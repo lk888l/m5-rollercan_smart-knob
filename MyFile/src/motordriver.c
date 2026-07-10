@@ -18,6 +18,7 @@
 
 #include "u8g2_disp_fun.h"
 #include "ws2812.h"
+#include "fast_control_link.h"
 
 #define     LIMIT_UDC       24.0f
 #define     SQRT3           1.732050808f
@@ -86,6 +87,9 @@ float32_t last_angle_corrected;
 uint16_t eangle_get;
 
 void MotorDriverSetMode(uint8_t val);
+static void MotorDriverApplyModeFromISR(uint8_t val);
+
+static uint32_t applied_mode_generation = UINT32_MAX;
 
 
 
@@ -340,6 +344,8 @@ static void VoltageControl(float32_t udc)
 
 void MotorDriverInit(void)
 {
+    FastControlLinkInit();
+    applied_mode_generation = UINT32_MAX;
     currentloop_enable=0;
 	eAngle_360=0;
     vbus=12.0f;
@@ -354,6 +360,17 @@ void MotorDriverInit(void)
 
 void MotorDriverProcess(void)
 {
+    FastControlCommandSnapshot command;
+    if (FastControlConsumeCommandFromISR(&command)) {
+        if (command.mode_generation != applied_mode_generation) {
+            MotorDriverApplyModeFromISR(command.driver_mode);
+            applied_mode_generation = command.mode_generation;
+        }
+        if (motor_driver_cal_busy == 0U) {
+            iq_curr_pi_target = command.iq_target_adc;
+        }
+    }
+
     angle_get=16383-EncoderGetAngle();
     if( angle_get>angle_offset )
     {
@@ -443,38 +460,12 @@ uint16_t GetMotorDriverEncCalOffset(void)
 //  MDRV_MODE_ENC_CAL:      Calibrate encoder by inject a 0 deg iq and read the encoder value, 
 //please check busy while calibrating, after calibration, mode will be set to MDRV_MODE_OFF and release motor.
 //  MDRV_MODE_RUN:          Normally run mode with current loop.
-void MotorDriverSetMode(uint8_t val)
+static void MotorDriverApplyModeFromISR(uint8_t val)
 {
     switch(val)
     {
         case MDRV_MODE_OFF:
         {
-            rgb_flash_flag = 0;
-            switch (motor_mode)
-            {
-            case MODE_SPEED:
-            case MODE_SPEED_ERR_PROTECT:
-                rgb_color = 0x003200;
-                break;
-            case MODE_POS:
-            case MODE_POS_ERR_PROTECT:
-                rgb_color = 0x000032;
-                break;
-            case MODE_CURRENT:
-                rgb_color = 0x323200;
-                break;
-            
-            default:
-                break;
-            } 
-            if (sys_status == SYS_ERROR) {
-                rgb_color = 0x320000;
-            }          
-           
-            if (error_code)
-                sys_status = SYS_ERROR;
-            else
-                sys_status = SYS_STANDBY;
             GPIOB->BRR=1<<2; //DISABLE Driver Output
 
             currentloop_enable =0;//Disable current loop
@@ -495,31 +486,6 @@ void MotorDriverSetMode(uint8_t val)
 
         case MDRV_MODE_RUN:
         {
-            rgb_flash_flag = 1;
-            switch (motor_mode)
-            {
-            case MODE_SPEED:
-            case MODE_SPEED_ERR_PROTECT:
-                rgb_color = 0x003200;
-                break;
-            case MODE_POS:
-            case MODE_POS_ERR_PROTECT:
-                rgb_color = 0x000032;
-                break;
-            case MODE_CURRENT:
-                rgb_color = 0x323200;
-                break;
-            
-            default:
-                break;
-            } 
-            if (sys_status == SYS_ERROR) {
-                rgb_color = 0x320000;
-            }             
-            // neopixel_set_color(0, rgb_color);
-            // neopixel_set_color(1, rgb_color); 
-            // ws2812_show();               
-            sys_status = SYS_RUNNING;
             GPIOB->BSRR=1<<2; //ENABLE Driver Output
             currentloop_enable =1;//Enable current loop
             break;
@@ -527,7 +493,6 @@ void MotorDriverSetMode(uint8_t val)
 
         case MDRV_MODE_ENC_CAL:
         {
-            sys_status = SYS_STANDBY;
             GPIOB->BSRR=1<<2;           //ENABLE Driver Output
             currentloop_enable =1;      //Enable current loop
             motor_driver_cal_init = 0;
@@ -539,6 +504,74 @@ void MotorDriverSetMode(uint8_t val)
 
     }
 
+}
+
+void MotorDriverSetMode(uint8_t val)
+{
+    switch (val)
+    {
+        case MDRV_MODE_OFF:
+            rgb_flash_flag = 0;
+            switch (motor_mode)
+            {
+                case MODE_SPEED:
+                case MODE_SPEED_ERR_PROTECT:
+                    rgb_color = 0x003200;
+                    break;
+                case MODE_POS:
+                case MODE_POS_ERR_PROTECT:
+                    rgb_color = 0x000032;
+                    break;
+                case MODE_CURRENT:
+                    rgb_color = 0x323200;
+                    break;
+                default:
+                    break;
+            }
+            if (error_code) {
+                sys_status = SYS_ERROR;
+                rgb_color = 0x320000;
+            }
+            else {
+                sys_status = SYS_STANDBY;
+            }
+            break;
+
+        case MDRV_MODE_RUN:
+            rgb_flash_flag = 1;
+            switch (motor_mode)
+            {
+                case MODE_SPEED:
+                case MODE_SPEED_ERR_PROTECT:
+                    rgb_color = 0x003200;
+                    break;
+                case MODE_POS:
+                case MODE_POS_ERR_PROTECT:
+                    rgb_color = 0x000032;
+                    break;
+                case MODE_CURRENT:
+                    rgb_color = 0x323200;
+                    break;
+                default:
+                    break;
+            }
+            if (sys_status == SYS_ERROR) {
+                rgb_color = 0x320000;
+            }
+            sys_status = SYS_RUNNING;
+            break;
+
+        case MDRV_MODE_ENC_CAL:
+            sys_status = SYS_STANDBY;
+            motor_driver_cal_busy = 1U;
+            FastControlPublishCurrentAdc(0.0f);
+            break;
+
+        default:
+            return;
+    }
+
+    FastControlPublishDriverMode(val);
 }
 
 //Set motor phase current by ADC value
@@ -554,7 +587,7 @@ void MotorDriverSetCurrentAdc(int32_t phase_current)
         if(phase_current< -1500)//-1.2A
         phase_current= -1500;
 
-        iq_curr_pi_target = (float32_t) phase_current;
+        FastControlPublishCurrentAdc((float32_t)phase_current);
     }
 }
 
@@ -573,7 +606,7 @@ void MotorDriverSetCurrentReal(float32_t phase_current)
         if(phase_current< -1200.0f)//-1.2A
         phase_current= -1200.0f;
         iq_calc = phase_current * 1.25f ;
-        iq_curr_pi_target = iq_calc;
+        FastControlPublishCurrentAdc(iq_calc);
     }
 }
 
@@ -607,6 +640,11 @@ uint16_t MotorDriverGetMechanicalAngle(void)
     uint16_t mangle;
     mangle=(angle_corrected)*3600/16383;
     return mangle;
+}
+
+uint16_t MotorDriverGetEncoderRaw(void)
+{
+    return (uint16_t)angle_corrected;
 }
 
 

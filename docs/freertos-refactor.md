@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-当前版本已完成第二阶段迁移：TIM1 中断只保留 FOC 快环，原外环、保护状态机和 SmartKnob 已迁移到 1 kHz ControlTask。调度器启动后，CAN 协议和按键控制命令也在 ControlTask 上下文中执行，形成控制状态的单写者边界。
+当前版本已完成第三阶段实时边界收口：TIM1 中断只保留 FOC 快环，原外环、保护状态机和 SmartKnob 已迁移到 1 kHz ControlTask；ControlTask 与 FOC ISR 之间通过带序号的命令/传感器快照交换数据，电流 PI 和驱动硬件状态由 FOC ISR 独占。
 
 已经完成：
 
@@ -17,6 +17,10 @@
 - 按键模式切换通过容量为 8 的静态控制命令邮箱提交，不再由 MaintenanceTask 直接修改 `motor_mode`。
 - Flash 写回拆到 StorageTask，并在 `SYS_RUNNING` 时延后。
 - TLE5012B SPI TXE/RXNE 轮询加入固定周期超时，异常时保留上次有效角度，避免锁死最高优先级 ISR。
+- `FastControlCommandSnapshot` 将驱动模式和 Iq 目标提交到 FOC 周期边界执行。
+- `FastSensorSnapshot` 将编码器、电流、母线 ADC 和温度作为一致样本发布给 ControlTask。
+- DWT CYCCNT 记录 FOC、ControlTask、CAN 单帧耗时和 1 kHz 周期抖动。
+- 三个应用任务每秒记录一次实际 stack high-water mark。
 
 ## 任务配置
 
@@ -48,8 +52,40 @@ ControlTask 使用 FreeRTOS tick 的绝对 1 ms 截止时间，不使用软件�
 | `app_control_deadline_miss_count` | 跨过的控制截止周期数 | 稳态应保持 0 |
 | `app_control_can_frame_count` | ControlTask 已处理的 CAN 帧数 | 随接收流量增加 |
 | `app_control_command_drop_count` | 控制邮箱满导致的丢弃数 | 应保持 0 |
+| `app_control_stack_min_words` | ControlTask 最小剩余栈 | 大于安全余量 |
+| `app_maintenance_stack_min_words` | MaintenanceTask 最小剩余栈 | 大于安全余量 |
+| `app_storage_stack_min_words` | StorageTask 最小剩余栈 | 大于安全余量 |
 
 CAN-I2C 桥接命令仍可能执行阻塞式 I2C 操作，这是本阶段按要求暂不深化的例外；若使用该命令，应预期 deadline miss 计数可能增加。
+
+## FOC / ControlTask 双向快照
+
+ControlTask 不再直接修改 `currentloop_enable`、电流 PI 积分项、驱动 GPIO 或最终的 `iq_curr_pi_target`：
+
+1. `MotorDriverSetMode()` 更新业务可见状态，并通过 `FastControlPublishDriverMode()` 发布期望驱动模式。
+2. `MotorDriverSetCurrentReal/Adc()` 完成限幅和单位换算，然后发布 Iq 目标。
+3. `MotorDriverProcess()` 在每个 FOC 周期开始时消费最新完整命令；模式变化、驱动 GPIO、PI 清零和 Iq 目标更新都在 ISR 内执行。
+4. FOC 和 ADC 处理完成后发布 `FastSensorSnapshot`。
+5. `Loop_Control()` 读取一致快照，并用快照内的原始编码器值完成速度展开。
+
+快照使用奇偶 sequence 和 `DMB` 屏障。命令写入用极短 PRIMASK 临界区支持 ControlTask 和尚未迁移的 I2C 回调两个生产者；FOC ISR 遇到写入中的奇数 sequence 时不会自旋，只在下个约 53.6 μs 周期重试。传感器读取最多尝试三次，失败时保留上一份有效快照。
+
+调试器可读取 `fast_control_command_apply_count`、`fast_sensor_read_retry_count` 和 `fast_sensor_read_failure_count`。正常运行时命令应用计数会随控制输出变化而增加；传感器失败计数应保持 0。
+
+## DWT 运行时间指标
+
+STM32G431 当前为 168 MHz，因此周期值除以 168 即约为微秒：
+
+| 变量 | 含义 | 参考边界 |
+| --- | --- | --- |
+| `runtime_foc_last_cycles` | 最近一次 FOC 路径耗时 | 小于约 9000 cycles |
+| `runtime_foc_max_cycles` | FOC 最大耗时 | 必须明显小于约 9000 cycles |
+| `runtime_control_last_cycles` | 最近一次控制步耗时 | 小于 168000 cycles |
+| `runtime_control_max_cycles` | 控制步最大耗时 | 应保留 CAN/抢占余量 |
+| `runtime_control_period_min_cycles` | 1 kHz 控制起点最短周期 | 接近 168000 cycles |
+| `runtime_control_period_max_cycles` | 1 kHz 控制起点最长周期 | 接近 168000 cycles |
+| `runtime_control_jitter_max_cycles` | 相对 1 ms 的最大绝对周期偏差 | 越小越好 |
+| `runtime_can_frame_max_cycles` | 单帧 CAN 协议最大处理耗时 | 不应逼近 168000 cycles |
 
 ## 控制周期重新离散化
 
@@ -97,7 +133,7 @@ FDCAN IRQ 优先级为 6，满足 `configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY=
 - `motor_mode` 和运行/保护状态。
 - 速度、位置、电流 setpoint。
 - 速度/位置 PID 参数、积分项和输出。
-- SmartKnob 状态和电流目标。
+- SmartKnob 状态和期望电流；最终 FOC 电流目标由 ISR 消费快照后写入。
 - CAN 命令引起的电机启停和故障恢复。
 
 当前已有的生产者路径：
@@ -114,13 +150,14 @@ I2C 从机 `Slave_Complete_Callback()` 仍会直接写控制状态，是明确�
 
 1. PB9 FOC 脉冲仍约为 18.67 kHz，脉宽和最大抖动正常。
 2. `app_control_step_count` 每秒约增加 1000，空闲和连续 CAN 下 `app_control_deadline_miss_count` 保持 0。
-3. ADC DMA 缓冲持续更新，TLE5012B 正常时 `encoder_spi_timeout_count` 不增加。
-4. 连续 CAN 通信无 RX FIFO overflow，回复延迟稳定，`app_control_can_frame_count` 与接收量一致。
-5. `app_control_command_drop_count` 保持 0，长按切换模式每次只切换一次。
-6. 分别验证速度、位置、电流、Dial/SmartKnob 四种模式；重点比较速度响应、位置保持和 detent 手感。
-7. 验证过压、位置越界、速度堵转、位置堵转和自动恢复状态机。
-8. 电机运行时请求保存，确认 Flash 写入被延后；停机后确认参数落盘。
-9. 测量三个任务和 IdleTask 的 stack high-water mark，并确认 stack overflow hook 未触发。
+3. `runtime_foc_max_cycles` 明显小于约 9000，`runtime_control_period_min/max_cycles` 围绕 168000。
+4. 比较空闲、连续 CAN 和四种模式下的 `runtime_control_jitter_max_cycles`。
+5. `fast_sensor_read_failure_count` 保持 0；ADC DMA 持续更新且 `encoder_spi_timeout_count` 不增加。
+6. 连续 CAN 通信无 RX FIFO overflow，回复延迟稳定，`app_control_can_frame_count` 与接收量一致。
+7. `app_control_command_drop_count` 保持 0，长按切换模式每次只切换一次。
+8. 分别验证速度、位置、电流、Dial/SmartKnob 四种模式；重点确认启停瞬间没有非预期电流。
+9. 验证编码器校准、过压、位置越界、速度堵转、位置堵转和自动恢复状态机。
+10. 运行各模式一段时间后读取三个 `app_*_stack_min_words`，再决定是否缩栈。
 
 ## 构建结果
 
@@ -130,12 +167,12 @@ I2C 从机 `Slave_Complete_Callback()` 仍会直接写控制状态，是明确�
 text 82832, data 1296, bss 5376
 ```
 
-当前第二阶段 Release：
+当前第三阶段 Release：
 
 ```text
-text 90184, data 1324, bss 14836
-RAM   16160 / 32576 bytes (49.61%)
-Flash 91520 / 112640 bytes (81.25%)
+text 91184, data 1348, bss 14940
+RAM   16288 / 32576 bytes (50.00%)
+Flash 92544 / 112640 bytes (82.16%)
 ```
 
-当前 Debug 也能链接，但 Flash 已占 `104148 / 112640` 字节（92.46%）。上板行为和 SmartKnob 手感应以 Release 固件为准。
+当前 Debug 也能链接，但 Flash 已占 `105476 / 112640` 字节（93.64%）。上板行为、DWT 最大值和 SmartKnob 手感应以 Release 固件为准。

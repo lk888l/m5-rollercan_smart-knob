@@ -80,6 +80,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/flash.c
     Core/Src/i2c_ex.c
     App/src/app_rtos.cpp
+    App/src/fast_control_link.cpp
+    App/src/runtime_metrics.cpp
     Middlewares/Third_Party/FreeRTOS/Source/list.c
     Middlewares/Third_Party/FreeRTOS/Source/queue.c
     Middlewares/Third_Party/FreeRTOS/Source/tasks.c

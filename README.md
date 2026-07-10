@@ -48,7 +48,7 @@ STM32G431XX_FLASH.ld  GCC 链接脚本
 
 ## 一句话运行图
 
-`main()` 完成外设初始化和 `InitMysys()` 后启动 FreeRTOS。1 kHz ControlTask 独占调度器启动后的外环、保护状态机、SmartKnob 和 CAN 控制命令写入；MaintenanceTask 负责 UI/按键/慢速维护，StorageTask 在电机停止后执行 Flash 写回。TIM1 中断只保留约 18.67 kHz FOC，启动调度器前的短暂初始化阶段才运行兼容外环。
+`main()` 完成外设初始化和 `InitMysys()` 后启动 FreeRTOS。1 kHz ControlTask 独占调度器启动后的外环、保护状态机、SmartKnob 和 CAN 控制命令写入；MaintenanceTask 负责 UI/按键/慢速维护，StorageTask 在电机停止后执行 Flash 写回。TIM1 中断只保留约 18.67 kHz FOC。ControlTask 与 FOC 通过带序号的驱动命令和传感器快照交换数据，驱动使能、电流目标和电流 PI 状态在 FOC 周期边界更新。
 
 ```text
 上电
@@ -81,6 +81,7 @@ cmake --build build\Debug
 
 - `Core/Src/stm32g4xx_it.c` 保留公开 IRQ 入口，TIM1 业务中断逻辑由 `MysysFastLoopISR()` 承担；该函数不得调用 FreeRTOS API。
 - 调度器启动后，CAN 和按键控制命令必须在 ControlTask 中修改控制状态；新增任务不要直接写 `motor_mode`、setpoint、PID 积分项或 fault state。
+- ControlTask 与 TIM1 ISR 之间的数据必须通过 `fast_control_link` 交换；不要重新从任务直接修改 `currentloop_enable`、电流 PI 积分项或 PWM 驱动使能。
 - `MyFile/src/mysys.c` 是系统状态、模式、PID 和保护逻辑的中心，改模式或单位时先从这里追数据流。
 - `main.c` 中的 `Slave_Complete_Callback()` 是 I2C 寄存器协议入口；`Core/Src/fdcan.c` 是 CAN 协议和 CAN-I2C 桥接入口。
 - `U8g2_lib` 已按当前 OLED 功能裁剪，增加字体或 U8g2 源文件前应先看 map/size。

@@ -7,6 +7,7 @@
 #include "fdcan.h"
 #include "main.h"
 #include "mysys.h"
+#include "runtime_metrics.h"
 
 namespace {
 
@@ -47,9 +48,15 @@ void MaintenanceTask(void *)
 {
     TickType_t last_wake = xTaskGetTickCount();
     const TickType_t period = pdMS_TO_TICKS(kMaintenancePeriodMs);
+    uint32_t stack_sample_count = 0U;
 
     for (;;) {
         LoopMysysOnce();
+        if (++stack_sample_count >= 100U) {
+            app_maintenance_stack_min_words =
+                static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr));
+            stack_sample_count = 0U;
+        }
         vTaskDelayUntil(&last_wake, period);
     }
 }
@@ -95,8 +102,14 @@ void ControlTask(void *)
                 app_control_deadline_miss_count +=
                     static_cast<uint32_t>(lateness / period);
             }
+            const uint32_t runtime_start_cycles = RuntimeMetricsControlBegin();
             MysysControlStep();
+            RuntimeMetricsRecordControl(runtime_start_cycles);
             ++app_control_step_count;
+            if ((app_control_step_count % 1000U) == 0U) {
+                app_control_stack_min_words =
+                    static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr));
+            }
             next_control += period;
             if (static_cast<int32_t>(now - next_control) >= 0) {
                 /* Do not burst several stale control iterations after a long
@@ -114,7 +127,9 @@ void ControlTask(void *)
             if (static_cast<int32_t>(xTaskGetTickCount() - next_control) >= 0) {
                 break;
             }
+            const uint32_t runtime_start_cycles = RuntimeMetricsCycleNow();
             FDCAN_ProcessPending();
+            RuntimeMetricsRecordCanFrame(runtime_start_cycles);
             ++app_control_can_frame_count;
         }
     }
@@ -124,9 +139,15 @@ void StorageTask(void *)
 {
     TickType_t last_wake = xTaskGetTickCount();
     const TickType_t period = pdMS_TO_TICKS(kStoragePeriodMs);
+    uint32_t stack_sample_count = 0U;
 
     for (;;) {
         MysysStorageOnce();
+        if (++stack_sample_count >= 50U) {
+            app_storage_stack_min_words =
+                static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr));
+            stack_sample_count = 0U;
+        }
         vTaskDelayUntil(&last_wake, period);
     }
 }
@@ -138,6 +159,9 @@ volatile uint32_t app_control_step_count = 0U;
 volatile uint32_t app_control_deadline_miss_count = 0U;
 volatile uint32_t app_control_can_frame_count = 0U;
 volatile uint32_t app_control_command_drop_count = 0U;
+volatile uint32_t app_control_stack_min_words = UINT32_MAX;
+volatile uint32_t app_maintenance_stack_min_words = UINT32_MAX;
+volatile uint32_t app_storage_stack_min_words = UINT32_MAX;
 }
 
 extern "C" void App_StartScheduler(void)
@@ -173,6 +197,7 @@ extern "C" void App_StartScheduler(void)
     configASSERT(control_handle != nullptr);
     configASSERT(storage_handle != nullptr);
 
+    RuntimeMetricsInit();
     vTaskStartScheduler();
     Error_Handler();
 }

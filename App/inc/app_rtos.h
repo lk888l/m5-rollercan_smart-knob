@@ -16,6 +16,9 @@ extern volatile uint32_t app_control_step_count;
 extern volatile uint32_t app_control_deadline_miss_count;
 extern volatile uint32_t app_control_can_frame_count;
 extern volatile uint32_t app_control_command_drop_count;
+extern volatile uint32_t app_control_stack_min_words;
+extern volatile uint32_t app_maintenance_stack_min_words;
+extern volatile uint32_t app_storage_stack_min_words;
 
 void App_StartScheduler(void);
 bool App_NotifyCanRxFromISR(void);

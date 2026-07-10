@@ -23,6 +23,7 @@ extern encoder_value_typedef speed_encoder_value_t;
 
 void encoder_update(void);
 void speed_encoder_update(void);
+void speed_encoder_update_from_angle(uint16_t angle);
 void encoder_reset_tracking(void);
 
 #endif

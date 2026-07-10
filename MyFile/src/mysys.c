@@ -27,6 +27,8 @@
 #include "arm_math.h"
 #include "fdcan.h"
 #include "app_rtos.h"
+#include "fast_control_link.h"
+#include "runtime_metrics.h"
 
 #define MAX_RECORD_SIZE 256
 #define MAX_STALLED_CURRENT 500
@@ -178,6 +180,7 @@ static float speed_filter_alpha =
     (1.0f / (1.0f + 1.0f/(2.0f * PI * (1.0f / LEGACY_CONTROL_RATE_HZ) * 2.0f)));
 static float encoder_counts_to_rpm = 60.0f * LEGACY_CONTROL_RATE_HZ;
 static float encoder_counts_to_rps = 2.0f * PI * LEGACY_CONTROL_RATE_HZ;
+static FastSensorSnapshot control_sensor_snapshot;
 
 void Rpm_Count_100us(void);
 
@@ -742,18 +745,29 @@ void MysysStorageOnce(void)
 
 void Loop_FOC(void)
 {
+  uint32_t runtime_start_cycles = RuntimeMetricsCycleNow();
   GPIOB->BSRR=GPIO_PIN_9;
   MotorDriverProcess();
   MyAdcProcess();
+  FastSensorPublishFromISR(MotorDriverGetEncoderRaw(),
+                           MotorDriverGetMechanicalAngle(),
+                           MyAdcGetVal(1, 4),
+                           MotorDriverGetPhaseCurrentReal(),
+                           internal_temp_raw);
   GPIOB->BRR=GPIO_PIN_9;
+  RuntimeMetricsRecordFoc(runtime_start_cycles);
 
 }
 
 void Loop_Control(void)
 {
+  FastSensorSnapshot latest_sensor_snapshot;
+  if (FastSensorRead(&latest_sensor_snapshot)) {
+    control_sensor_snapshot = latest_sensor_snapshot;
+  }
 
   encoder_absolute_angle_old = encoder_absolute_angle_new;
-  encoder_absolute_angle_new = MotorDriverGetMechanicalAngle()/10.0f;
+  encoder_absolute_angle_new = control_sensor_snapshot.mechanical_angle_tenths/10.0f;
 
   if(encoder_absolute_angle_new<90.0f && encoder_absolute_angle_old>180.0f )
   {
@@ -775,10 +789,10 @@ void Loop_Control(void)
     //T： 数据的采样频率的倒数，即采样周期，单位是秒。
     //fc : 截止频率。截止频率就是超过该频率的数据（噪声）都被过滤掉，只保留低于该截止频率的数据。
 
-    ph_current_rt = MotorDriverGetPhaseCurrentReal();
+    ph_current_rt = control_sensor_snapshot.phase_current_ma;
     ph_crrent_lpf += control_filter_alpha * (ph_current_rt - ph_crrent_lpf);
 
-    speed_encoder_update();
+    speed_encoder_update_from_angle(control_sensor_snapshot.encoder_raw);
 
     diff_encoder_value = speed_encoder_value_t.encoder_value - speed_encoder_value_t.last_encoder_value;
     diff_encoder_value_lpf += speed_filter_alpha * (diff_encoder_value - diff_encoder_value_lpf);
@@ -789,9 +803,9 @@ void Loop_Control(void)
     speed_encoder_value_t.last_encoder_value = speed_encoder_value_t.encoder_value;  
 
     //get input voltage
-    vol_input = (MyAdcGetVal(1,4)*330*6.4545454545f)/4095;//adc1_in4, e.g. 1036 = 10.36v
+    vol_input = (control_sensor_snapshot.bus_voltage_adc*330*6.4545454545f)/4095;//adc1_in4, e.g. 1036 = 10.36v
     vol_lpf += control_filter_alpha * (vol_input - vol_lpf);
-    temp_lpf += control_filter_alpha * ((float)internal_temp_raw - temp_lpf);
+    temp_lpf += control_filter_alpha * ((float)control_sensor_snapshot.internal_temp_raw - temp_lpf);
     internal_temp = (int32_t)temp_lpf;
 
     if (!over_vol_flag) {

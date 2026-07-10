@@ -33,7 +33,9 @@ ROLLERCAN 固件可以按四层理解：
 ADC1 DMA -> adc1_convbuf
   -> MyAdcProcess
   -> ia/ib/ic, internal_temp_raw
-  -> MotorDriverProcess / Loop_Control
+  -> MotorDriverProcess
+  -> FastSensorSnapshot
+  -> Loop_Control
 
 TLE5012B SPI -> EncoderGetAngle
   -> MotorDriverProcess
@@ -44,13 +46,17 @@ TLE5012B SPI -> EncoderGetAngle
 CAN 命令 -> FDCAN ISR notification -> ControlTask
 按键命令 -> 静态控制邮箱 -> ControlTask
   -> motor_output / motor_mode / setpoint / PID / protection flags
-  -> MotorDriverSetMode / MotorDriverSetCurrentReal / PIDTuningsSet
+  -> MotorDriverSetMode / MotorDriverSetCurrentReal
+  -> FastControlCommandSnapshot
+  -> TIM1 ISR 周期边界应用驱动模式和电流目标
 
 系统状态 -> u8g2_disp_fun / ws2812
   -> OLED 页面、通信闪烁、运行模式图标、RGB 灯效
 ```
 
 调度器启动后，CAN 和按键路径遵守 ControlTask 单写者模型。I2C 从机完成回调仍直接写控制状态，是当前按计划暂未迁移的边界。
+
+`App/src/fast_control_link.cpp` 使用奇偶 sequence 和内存屏障传递快照。命令发布期间只关闭极短时间的全局中断，FOC ISR 不等待任务完成；传感器读取若恰好被 FOC 更新打断，会有限次重读并在失败时保留上一份有效快照。
 
 ## 重要全局状态
 

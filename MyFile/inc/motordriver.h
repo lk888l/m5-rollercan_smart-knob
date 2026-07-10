@@ -23,6 +23,7 @@ void MotorDriverProcess(void);
 void MotorDriverInterrupt(void);
 
 uint16_t MotorDriverGetMechanicalAngle(void);
+uint16_t MotorDriverGetEncoderRaw(void);
 
 void MotorDriverSetUq(float32_t uq_set);
 

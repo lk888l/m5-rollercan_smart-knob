@@ -8,10 +8,11 @@
   -> ControlTask（1 kHz）
        -> Loop_Control：角度/速度估计、低通和保护
        -> 模式控制：speed_pid / pos_pid / current / handle_smart_knob
-       -> 更新 FOC 使用的电流目标
+       -> 发布 FastControlCommandSnapshot
 
 TIM1 update ISR（约 18.67 kHz）
   -> Loop_FOC
+       -> 消费最新驱动模式和电流目标
        -> MotorDriverProcess
             -> 编码器角度
             -> Clarke/Park
@@ -20,6 +21,7 @@ TIM1 update ISR（约 18.67 kHz）
             -> SVM
             -> TIM1 CCR1/2/3
        -> MyAdcProcess
+       -> 发布 FastSensorSnapshot
 ```
 
 ## FOC 电流环
@@ -58,6 +60,8 @@ FOC 实现在 `MyFile/src/motordriver.c`。
 ## 机械角度与速度估计
 
 `Loop_Control()` 做机械侧状态估计：
+
+- 每个控制步读取一份一致的 `FastSensorSnapshot`；若读取与 FOC 更新碰撞，则保留上一份有效快照。
 
 - `MotorDriverGetMechanicalAngle()` 返回单圈角度，单位为 0.1 度。
 - 通过跨越 0/360 度边界判断 `mechanical_turns` 增减。
