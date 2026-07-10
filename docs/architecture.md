@@ -1,0 +1,74 @@
+# 系统架构
+
+## 分层
+
+ROLLERCAN 固件可以按四层理解：
+
+| 层级 | 目录/文件 | 职责 |
+| --- | --- | --- |
+| 启动与芯片支持 | `startup_stm32g431xx.s`, `system_stm32g4xx.c`, `STM32G431XX_FLASH.ld` | 向量表、系统时钟基础、链接布局 |
+| CubeMX 外设层 | `Core/Src/*.c`, `Core/Inc/*.h`, `cmake/stm32cubemx` | GPIO、ADC、DMA、TIM、SPI、I2C、FDCAN 初始化和 IRQ 入口 |
+| 业务控制层 | `MyFile/src/*.c`, `MyFile/inc/*.h`, `Core/Src/flash.c`, `Core/Src/i2c_ex.c` | 电机控制、系统调度、通信协议、显示菜单、灯效、参数保存 |
+| 第三方库 | `U8g2_lib`, CMSIS/HAL/LL | OLED 绘图、ARM 数学函数、STM32 HAL/LL 驱动 |
+
+## 运行上下文
+
+工程同时存在主循环上下文和中断上下文：
+
+| 上下文 | 入口 | 主要动作 |
+| --- | --- | --- |
+| 主循环 | `LoopMysys()` | I2C 超时恢复、Flash 写回、CAN 重新初始化、按钮扫描、OLED 刷新、WS2812 灯效 |
+| TIM1 更新中断 | `TIM1_UP_TIM16_IRQHandler()` -> `mysys_tim1_update_handler()` | FOC、电流采样处理、机械角度/速度估计、保护检测、速度/位置 PID、SmartKnob |
+| I2C1 事件中断 | `I2C1_EV_IRQHandler()` -> `i2c1_event_irq_handler()` | I2C 从机收发、事务完成回调到 `Slave_Complete_Callback()` |
+| I2C1 错误中断 | `I2C1_ER_IRQHandler()` -> `i2c1_error_irq_handler()` | 复位并重新初始化 I2C 从机 |
+| FDCAN 接收中断 | `FDCAN1_IT0_IRQHandler()` -> HAL callback | 解析 CAN 扩展 ID 和 8 字节数据，执行本机或桥接命令 |
+| DMA 中断 | ADC DMA、TIM3 CH2 DMA | ADC 循环采样搬运、WS2812 PWM-DMA 发送完成 |
+
+## 核心数据流
+
+```text
+ADC1 DMA -> adc1_convbuf
+  -> MyAdcProcess
+  -> ia/ib/ic, internal_temp_raw
+  -> MotorDriverProcess / Loop_Control
+
+TLE5012B SPI -> EncoderGetAngle
+  -> MotorDriverProcess
+  -> angle_corrected / eangle_get
+  -> FOC Park/Clarke/SVM
+  -> TIM1 CCR1/CCR2/CCR3
+
+通信命令 -> I2C Slave 或 FDCAN callback
+  -> motor_output / motor_mode / setpoint / PID / protection flags
+  -> MotorDriverSetMode / MotorDriverSetCurrentReal / PIDTuningsSet
+
+系统状态 -> u8g2_disp_fun / ws2812
+  -> OLED 页面、通信闪烁、运行模式图标、RGB 灯效
+```
+
+## 重要全局状态
+
+| 变量 | 定义位置 | 含义 |
+| --- | --- | --- |
+| `sys_status` | `MyFile/src/mysys.c` | `SYS_STANDBY`、`SYS_RUNNING`、`SYS_ERROR` |
+| `motor_mode` | `MyFile/src/mysys.c` | 速度、位置、电流、Dial，以及保护态 |
+| `motor_output` | `MyFile/src/mysys.c` | 外部命令控制的电机开关 |
+| `speed_point`, `pos_point`, `current_point` | `MyFile/src/mysys.c` | 通信协议写入的目标值，整数缩放后进入控制器 |
+| `pid_ctrl_speed_t`, `pid_ctrl_pos_t` | `MyFile/src/mysys.c` | 速度环和位置环 PID 对象 |
+| `mechanical_angle`, `mechanical_rad` | `MyFile/src/mysys.c` | 多圈机械角度和弧度 |
+| `ph_crrent_lpf`, `vol_lpf` | `MyFile/src/mysys.c` | 相电流和母线电压低通值 |
+| `can_id`, `bps_index` | `Core/Src/fdcan.c`, `mysys.c` | CAN 节点 ID 和波特率索引 |
+| `i2c_address[0]` | `Core/Src/main.c` | 本机 I2C 7-bit 地址 |
+| `comm_type` | `MyFile/src/u8g2_disp_fun.c` | I2C、CAN、CAN->I2C 三种通信模式 |
+
+## CubeMX 与手写代码边界
+
+`Core/Src/*.c` 大部分是 CubeMX 生成文件，但本工程在几个文件的 USER CODE 区加入了业务逻辑：
+
+- `main.c`：启动前 SRAM 向量表重映射、Flash 参数初始化/写回、I2C 从机协议分发。
+- `stm32g4xx_it.c`：中断入口中调用手写 helper。
+- `fdcan.c`：CAN 协议解析和桥接逻辑在 USER CODE 区。
+- `i2c.c`：除 CubeMX 初始化外，还提供 I2C 主机读写 helper。
+- `flash.c`, `i2c_ex.c`：手写扩展模块，被根 CMake 手动加入 target。
+
+维护时应避免把公开 IRQ 入口重复定义到 `MyFile` 中；公开入口留在 `stm32g4xx_it.c`，业务逻辑放 helper。
