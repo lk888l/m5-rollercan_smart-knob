@@ -37,6 +37,7 @@
 #include "u8g2_disp_fun.h"
 #include "myadc.h"
 #include "smart_knob.h"
+#include "app_rtos.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -278,7 +279,6 @@ void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
 
 void Slave_Complete_Callback(uint8_t *rx_data, uint16_t len)
 {
-  uint8_t buf[4];
   uint8_t rx_buf[16];
   uint8_t tx_buf[16];
   uint8_t rx_mark[16] = {0};  
@@ -915,13 +915,13 @@ int main(void)
   /* USER CODE BEGIN 2 */
 	InitMysys();
   sk6812_init(PIXEL_MAX); 	
+  App_StartScheduler();
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-		LoopMysys();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

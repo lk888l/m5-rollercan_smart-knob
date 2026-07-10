@@ -4,10 +4,10 @@
 
 CubeMX 可能重新生成 `Core/Src/stm32g4xx_it.c`、外设初始化文件和 `cmake/stm32cubemx/CMakeLists.txt`。再生成后重点检查：
 
-- `TIM1_UP_TIM16_IRQHandler()` 是否仍在 USER CODE 区调用 `mysys_tim1_update_handler()`。
+- `TIM1_UP_TIM16_IRQHandler()` 是否仍在 USER CODE 区调用 `MysysFastLoopISR()`，且没有再次调用 `HAL_TIM_IRQHandler()`。
 - `I2C1_EV_IRQHandler()` 是否仍调用 `i2c1_event_irq_handler()`。
 - `I2C1_ER_IRQHandler()` 是否仍调用 `i2c1_error_irq_handler()`。
-- 根 `CMakeLists.txt` 是否仍手动加入 `Core/Src/flash.c`、`Core/Src/i2c_ex.c`、`MyFile/src/*.c` 和裁剪后的 U8g2 源。
+- 根 `CMakeLists.txt` 是否仍加入 `App/src/app_rtos.cpp`、FreeRTOS kernel/port、`Core/Src/flash.c`、`Core/Src/i2c_ex.c`、`MyFile/src/*.c` 和裁剪后的 U8g2 源。
 
 公开 IRQ 入口函数不要复制到 `MyFile` 或其他源文件中，否则链接时会出现重复定义。正确做法是：
 

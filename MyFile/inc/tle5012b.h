@@ -33,6 +33,7 @@ typedef struct{
 }ENCODER_Typedef;
 
 extern ENCODER_Typedef	encoder;
+extern volatile uint32_t encoder_spi_timeout_count;
 
 void EncoderInit(void);	
 float32_t EncoderGetAngle(void);		

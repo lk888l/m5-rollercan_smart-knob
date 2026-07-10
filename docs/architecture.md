@@ -8,21 +8,24 @@ ROLLERCAN 固件可以按四层理解：
 | --- | --- | --- |
 | 启动与芯片支持 | `startup_stm32g431xx.s`, `system_stm32g4xx.c`, `STM32G431XX_FLASH.ld` | 向量表、系统时钟基础、链接布局 |
 | CubeMX 外设层 | `Core/Src/*.c`, `Core/Inc/*.h`, `cmake/stm32cubemx` | GPIO、ADC、DMA、TIM、SPI、I2C、FDCAN 初始化和 IRQ 入口 |
-| 业务控制层 | `MyFile/src/*.c`, `MyFile/inc/*.h`, `Core/Src/flash.c`, `Core/Src/i2c_ex.c` | 电机控制、系统调度、通信协议、显示菜单、灯效、参数保存 |
-| 第三方库 | `U8g2_lib`, CMSIS/HAL/LL | OLED 绘图、ARM 数学函数、STM32 HAL/LL 驱动 |
+| RTOS 应用层 | `App/src/app_rtos.cpp`, `App/inc/app_rtos.h` | C++17 静态任务、控制邮箱和 C/C++ 边界 |
+| 业务控制层 | `MyFile/src/*.c`, `MyFile/inc/*.h`, `Core/Src/flash.c`, `Core/Src/i2c_ex.c` | 电机控制、通信协议、显示菜单、灯效、参数保存 |
+| 第三方库 | `Middlewares/Third_Party/FreeRTOS`, `U8g2_lib`, CMSIS/HAL/LL | 调度、OLED 绘图、ARM 数学函数和 STM32 驱动 |
 
 ## 运行上下文
 
-工程同时存在主循环上下文和中断上下文：
+工程使用静态 FreeRTOS 任务和少量中断上下文：
 
 | 上下文 | 入口 | 主要动作 |
 | --- | --- | --- |
-| 主循环 | `LoopMysys()` | I2C 超时恢复、Flash 写回、CAN 重新初始化、按钮扫描、OLED 刷新、WS2812 灯效 |
-| TIM1 更新中断 | `TIM1_UP_TIM16_IRQHandler()` -> `mysys_tim1_update_handler()` | FOC、电流采样处理、机械角度/速度估计、保护检测、速度/位置 PID、SmartKnob |
+| ControlTask | `App/src/app_rtos.cpp` | 1 kHz 外环、保护、速度/位置 PID、SmartKnob、CAN 协议和控制命令 |
+| MaintenanceTask | `App/src/app_rtos.cpp` -> `LoopMysysOnce()` | I2C 超时恢复、按钮扫描、OLED 刷新、WS2812 灯效 |
+| StorageTask | `App/src/app_rtos.cpp` -> `MysysStorageOnce()` | 安全状态下的 Flash 写回 |
+| TIM1 更新中断 | `TIM1_UP_TIM16_IRQHandler()` -> `MysysFastLoopISR()` | 约 18.67 kHz FOC 和 ADC 数据处理 |
 | I2C1 事件中断 | `I2C1_EV_IRQHandler()` -> `i2c1_event_irq_handler()` | I2C 从机收发、事务完成回调到 `Slave_Complete_Callback()` |
 | I2C1 错误中断 | `I2C1_ER_IRQHandler()` -> `i2c1_error_irq_handler()` | 复位并重新初始化 I2C 从机 |
-| FDCAN 接收中断 | `FDCAN1_IT0_IRQHandler()` -> HAL callback | 解析 CAN 扩展 ID 和 8 字节数据，执行本机或桥接命令 |
-| DMA 中断 | ADC DMA、TIM3 CH2 DMA | ADC 循环采样搬运、WS2812 PWM-DMA 发送完成 |
+| FDCAN 接收中断 | `FDCAN1_IT0_IRQHandler()` -> HAL callback | 只通知 ControlTask；不解析协议 |
+| DMA 中断 | TIM3 CH2 DMA 等 | WS2812 PWM-DMA 发送完成；ADC DMA HT/TC IRQ 已关闭 |
 
 ## 核心数据流
 
@@ -38,13 +41,16 @@ TLE5012B SPI -> EncoderGetAngle
   -> FOC Park/Clarke/SVM
   -> TIM1 CCR1/CCR2/CCR3
 
-通信命令 -> I2C Slave 或 FDCAN callback
+CAN 命令 -> FDCAN ISR notification -> ControlTask
+按键命令 -> 静态控制邮箱 -> ControlTask
   -> motor_output / motor_mode / setpoint / PID / protection flags
   -> MotorDriverSetMode / MotorDriverSetCurrentReal / PIDTuningsSet
 
 系统状态 -> u8g2_disp_fun / ws2812
   -> OLED 页面、通信闪烁、运行模式图标、RGB 灯效
 ```
+
+调度器启动后，CAN 和按键路径遵守 ControlTask 单写者模型。I2C 从机完成回调仍直接写控制状态，是当前按计划暂未迁移的边界。
 
 ## 重要全局状态
 

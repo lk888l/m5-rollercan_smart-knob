@@ -74,16 +74,12 @@ CMake Debug 常见产物：
 | --- | --- |
 | `build/Debug/ROLLERCAN.elf` | GCC 链接后的固件 ELF |
 | `build/Debug/ROLLERCAN.map` | 链接 map，用于查看符号和 Flash/RAM 占用 |
+| `build/Debug/ROLLERCAN.hex` | 从应用地址 `0x08002000` 开始的应用 HEX |
+| `build/Debug/ROLLERCAN.bin` | 纯应用 BIN，烧录偏移为 `0x08002000` |
+| `build/Debug/ROLLERCAN_standalone.hex` | 包含 `0x08000000` 启动向量跳板和应用的整片 HEX |
 | `build/Debug/compile_commands.json` | clangd/编辑器索引数据库 |
 
-CMake 当前没有在脚本里显式添加 `.hex` 或 `.bin` 生成规则；如果需要，可用 `arm-none-eabi-objcopy` 从 ELF 生成。
-
-示例：
-
-```powershell
-arm-none-eabi-objcopy -O ihex build\Debug\ROLLERCAN.elf build\Debug\ROLLERCAN.hex
-arm-none-eabi-objcopy -O binary build\Debug\ROLLERCAN.elf build\Debug\ROLLERCAN.bin
-```
+CMake 在每次链接后自动生成上述 HEX/BIN。已有 bootloader 时使用 `ROLLERCAN.hex` 或把 `ROLLERCAN.bin` 写入 `0x08002000`；整片擦除后直接启动应用时使用 `ROLLERCAN_standalone.hex`。
 
 ## 烧录
 

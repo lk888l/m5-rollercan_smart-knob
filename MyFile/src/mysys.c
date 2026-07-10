@@ -26,6 +26,7 @@
 #include "smart_knob.h"
 #include "arm_math.h"
 #include "fdcan.h"
+#include "app_rtos.h"
 
 #define MAX_RECORD_SIZE 256
 #define MAX_STALLED_CURRENT 500
@@ -165,6 +166,18 @@ uint8_t rgb_show_mode = 0;
 uint32_t rgb_color_buffer[RGB_BUFFER_SIZE] = {0};
 uint32_t rgb_color_buffer_index = 0;
 uint32_t lastest_rgb_color = 0;
+
+#define LEGACY_CONTROL_RATE_HZ 5600.0f
+#define LEGACY_MODE_RATE_HZ (56000.0f / 11.0f)
+#define CONTROL_TASK_RATE_HZ 1000.0f
+
+static volatile uint8_t control_task_active = 0;
+static float control_filter_alpha =
+    (1.0f / (1.0f + 1.0f/(2.0f * PI * 0.0002f * 2.0f)));
+static float speed_filter_alpha =
+    (1.0f / (1.0f + 1.0f/(2.0f * PI * (1.0f / LEGACY_CONTROL_RATE_HZ) * 2.0f)));
+static float encoder_counts_to_rpm = 60.0f * LEGACY_CONTROL_RATE_HZ;
+static float encoder_counts_to_rps = 2.0f * PI * LEGACY_CONTROL_RATE_HZ;
 
 void Rpm_Count_100us(void);
 
@@ -526,20 +539,23 @@ void InitMysys(void)
 	MyADCInit();
 	TIM1->CCR4=995;//Enable TIM1 CH4 for ADC trigger
 
+	/* Initialise every dependency used by the FOC ISR before TIM1 can enter it.
+	 * In particular, EncoderInit() enables SPI1; entering Loop_FOC() earlier
+	 * leaves SPI RXNE permanently low after the first DR write. */
+	MotorDriverInit();
+	EncoderInit();
+
 	//Enable TIM1 channels for PWM generate
 	HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_1);
 	HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_2);
 	HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_3);  
 
 	HAL_Delay(20);
-  //TIM1 update interrupt for FOC and outside control loop
-  __HAL_TIM_ENABLE_IT(&htim1, TIM_IT_UPDATE);
-
-	MotorDriverInit();
-
 	MyADCZeroCal();
 
-	EncoderInit();
+  //TIM1 update interrupt for FOC and outside control loop
+  __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_UPDATE);
+  __HAL_TIM_ENABLE_IT(&htim1, TIM_IT_UPDATE);
   HAL_Delay(300); 
   init_flash_data();
   u8g2Init(&u8g2);  
@@ -583,8 +599,13 @@ void InitMysys(void)
 
 void LoopMysys(void)
 {
-    while(1)
-    {	  
+    while (1) {
+      LoopMysysOnce();
+    }
+}
+
+void LoopMysysOnce(void)
+{
         i2c_timeout_counter = 0;
         if (i2c_stop_timeout_flag) {
           if (i2c_stop_timeout_delay < HAL_GetTick()) {
@@ -601,15 +622,6 @@ void LoopMysys(void)
           i2c1_it_enable();
           HAL_Delay(500);
         }       
-        if (flash_data_write_back_flag) {
-          flash_data_write_back();
-          flash_data_write_back_flag = 0;
-        }
-        if (can_change_flag) {
-          user_fdcan_init();
-          flash_data_write_back();
-          can_change_flag = 0;
-        }       
         button_update();
         u8g2_disp_update_mode();
         u8g2_disp_update_page();
@@ -624,13 +636,7 @@ void LoopMysys(void)
         }
         if (my_button.is_longlongpressed) {
           if (mode_switch_flag) {
-            motor_mode++;
-            if (motor_mode >= MODE_MAX) {
-              motor_mode = MODE_SPEED;
-            }
-            if (motor_mode == MODE_DIAL) {
-              init_smart_knob();
-            }            
+            App_PostControlCommand(APP_CONTROL_COMMAND_CYCLE_MODE, 0);
             my_button.is_longlongpressed = 0;
           }
         }
@@ -712,7 +718,26 @@ void LoopMysys(void)
           }
           act_delay = HAL_GetTick() + 1000;
         }
-	}
+}
+
+void MysysStorageOnce(void)
+{
+  /* Flash operations may stall instruction fetch.  Defer them until the
+     current-control output is no longer running. */
+  if (flash_data_write_back_flag && sys_status != SYS_RUNNING) {
+    flash_data_write_back();
+    flash_data_write_back_flag = 0;
+  }
+
+  if (can_change_flag) {
+    user_fdcan_init();
+    if (sys_status != SYS_RUNNING) {
+      flash_data_write_back();
+    } else {
+      flash_data_write_back_flag = 1;
+    }
+    can_change_flag = 0;
+  }
 }
 
 void Loop_FOC(void)
@@ -751,22 +776,22 @@ void Loop_Control(void)
     //fc : 截止频率。截止频率就是超过该频率的数据（噪声）都被过滤掉，只保留低于该截止频率的数据。
 
     ph_current_rt = MotorDriverGetPhaseCurrentReal();
-    ph_crrent_lpf += (1.0f / (1.0f + 1.0f/(2.0f * 3.14f *0.0002f*2.0f)))*(ph_current_rt - ph_crrent_lpf );
+    ph_crrent_lpf += control_filter_alpha * (ph_current_rt - ph_crrent_lpf);
 
     speed_encoder_update();
 
     diff_encoder_value = speed_encoder_value_t.encoder_value - speed_encoder_value_t.last_encoder_value;
-    diff_encoder_value_lpf += (1.0f / (1.0f + 1.0f/(2.0f * 3.14f *0.00017857142857f*2.0f)))*(diff_encoder_value - diff_encoder_value_lpf );
+    diff_encoder_value_lpf += speed_filter_alpha * (diff_encoder_value - diff_encoder_value_lpf);
 
     rpm_rps_count_temp = diff_encoder_value_lpf / 16383.0f;
-    motor_rpm = rpm_rps_count_temp * 336000;
-    motor_rps = rpm_rps_count_temp * 2016000 * PI / 180.0f;
+    motor_rpm = rpm_rps_count_temp * encoder_counts_to_rpm;
+    motor_rps = rpm_rps_count_temp * encoder_counts_to_rps;
     speed_encoder_value_t.last_encoder_value = speed_encoder_value_t.encoder_value;  
 
     //get input voltage
     vol_input = (MyAdcGetVal(1,4)*330*6.4545454545f)/4095;//adc1_in4, e.g. 1036 = 10.36v
-    vol_lpf += (1.0f / (1.0f + 1.0f/(2.0f * 3.14f *0.0002f*2.0f)))*(vol_input - vol_lpf );
-    temp_lpf += (1.0f / (1.0f + 1.0f/(2.0f * 3.14f *0.0002f*2.0f)))*((float)internal_temp_raw - temp_lpf );
+    vol_lpf += control_filter_alpha * (vol_input - vol_lpf);
+    temp_lpf += control_filter_alpha * ((float)internal_temp_raw - temp_lpf);
     internal_temp = (int32_t)temp_lpf;
 
     if (!over_vol_flag) {
@@ -856,125 +881,152 @@ void Rpm_Count_100us(void)
   }
 }
 
-
-void TIM1_UP_TIM16_IRQHandler(void)
+void MysysCycleMode(void)
 {
-  
-  __HAL_TIM_CLEAR_IT(&htim1, TIM_IT_UPDATE);
-
-  if(counter_loop_foc<2)
-  {
-    counter_loop_foc+=1;
-  }
-  else
-  {
-    counter_loop_foc=0;
-    Loop_FOC();
-  }
- 
-
-  if(counter_loop_control<9)
-  {
-    counter_loop_control+=1;
-  }
-  else
-  {
-    counter_loop_control=0;
-    Loop_Control();
+  if (!mode_switch_flag) {
+    return;
   }
 
-  if(pid_compute_counter<10)
-  {
-    pid_compute_counter+=1;
+  motor_mode++;
+  if (motor_mode >= MODE_MAX) {
+    motor_mode = MODE_SPEED;
   }
-  else
+  if (motor_mode == MODE_DIAL) {
+    init_smart_knob();
+  }
+}
+
+static void MysysRunModeController(void)
+{
+  switch (motor_mode)
   {
-    pid_compute_counter=0;
-    switch (motor_mode)
-    {
-    case MODE_SPEED:
-      if (sys_status == SYS_RUNNING) {
-        if (motor_stall_protection_flag) {
-          speed_err_value = abs((int32_t)(speed_err_rate * pid_ctrl_speed_t.setpoint));
-          speed_err_timeout = 3;
-        }
-        else {
-          speed_err_value = 0;
-          speed_err_timeout = 0;          
-        }
-        speed_pid();
+  case MODE_SPEED:
+    if (sys_status == SYS_RUNNING) {
+      if (motor_stall_protection_flag) {
+        speed_err_value = abs((int32_t)(speed_err_rate * pid_ctrl_speed_t.setpoint));
+        speed_err_timeout = 3;
       }
-      break;
-    case MODE_POS:
-      if (sys_status == SYS_RUNNING) {
-        if (motor_stall_protection_flag) {
-          if (abs((int32_t)pid_ctrl_pos_t.setpoint) > 10)
-            pos_err_value = 10;
-          else
-            pos_err_value = abs((int32_t)(pos_err_rate * pid_ctrl_pos_t.setpoint));
-          pos_err_timeout = 3;
-        }
-        else {
-          pos_err_value = 0;
-          pos_err_timeout = 0;          
-        }
-        pos_pid();
+      else {
+        speed_err_value = 0;
+        speed_err_timeout = 0;
       }
-      break;
-    case MODE_SPEED_ERR_PROTECT:
-      if (HAL_GetTick() - speed_err_auto_counter > 2000 && speed_err_count_flag) {
-        if (!err_stalled_flag && err_recover_try_max && speed_err_recover_try_counter <= err_recover_try_max - 1) {
-          speed_err_recover_try_counter++;
-          MotorDriverSetMode(MDRV_MODE_RUN);
-          motor_mode = MODE_SPEED;
-          speed_err_count_flag = 2;
-        }
-        else {
-          err_stalled_flag = 1;
-        }
-      }
-      break;
-    case MODE_POS_ERR_PROTECT:
-      if (HAL_GetTick() - pos_err_auto_counter > 2000 && pos_err_count_flag) {
-        if (!err_stalled_flag && err_recover_try_max && pos_err_recover_try_counter <= err_recover_try_max - 1) {
-          pos_err_recover_try_counter++;
-          MotorDriverSetMode(MDRV_MODE_RUN);
-          motor_mode = MODE_POS;
-          pos_err_count_flag = 2;
-        }
-        else {
-          err_stalled_flag = 1;
-        }
-      }
-      break;
-    case MODE_CURRENT:
-      if (sys_status == SYS_RUNNING) {
-        current_point_float = (float)current_point / 100.0f;
-        if (fabsf(ph_crrent_lpf / current_point_float) < 0.90f) {
-          rgb_flash_slow = 1;
-        }
-        else {
-          rgb_flash_slow = 0;
-        }
-      }
-      break;
-    case MODE_DIAL:
-      if (sys_status == SYS_RUNNING || sys_status == SYS_STANDBY)
-        handle_smart_knob();
-      break;      
-    
-    default:
-      break;
+      speed_pid();
     }
-    
+    break;
+  case MODE_POS:
+    if (sys_status == SYS_RUNNING) {
+      if (motor_stall_protection_flag) {
+        if (abs((int32_t)pid_ctrl_pos_t.setpoint) > 10)
+          pos_err_value = 10;
+        else
+          pos_err_value = abs((int32_t)(pos_err_rate * pid_ctrl_pos_t.setpoint));
+        pos_err_timeout = 3;
+      }
+      else {
+        pos_err_value = 0;
+        pos_err_timeout = 0;
+      }
+      pos_pid();
+    }
+    break;
+  case MODE_SPEED_ERR_PROTECT:
+    if (HAL_GetTick() - speed_err_auto_counter > 2000 && speed_err_count_flag) {
+      if (!err_stalled_flag && err_recover_try_max && speed_err_recover_try_counter <= err_recover_try_max - 1) {
+        speed_err_recover_try_counter++;
+        MotorDriverSetMode(MDRV_MODE_RUN);
+        motor_mode = MODE_SPEED;
+        speed_err_count_flag = 2;
+      }
+      else {
+        err_stalled_flag = 1;
+      }
+    }
+    break;
+  case MODE_POS_ERR_PROTECT:
+    if (HAL_GetTick() - pos_err_auto_counter > 2000 && pos_err_count_flag) {
+      if (!err_stalled_flag && err_recover_try_max && pos_err_recover_try_counter <= err_recover_try_max - 1) {
+        pos_err_recover_try_counter++;
+        MotorDriverSetMode(MDRV_MODE_RUN);
+        motor_mode = MODE_POS;
+        pos_err_count_flag = 2;
+      }
+      else {
+        err_stalled_flag = 1;
+      }
+    }
+    break;
+  case MODE_CURRENT:
+    if (sys_status == SYS_RUNNING) {
+      current_point_float = (float)current_point / 100.0f;
+      if (current_point_float != 0.0f && fabsf(ph_crrent_lpf / current_point_float) < 0.90f) {
+        rgb_flash_slow = 1;
+      }
+      else {
+        rgb_flash_slow = 0;
+      }
+    }
+    break;
+  case MODE_DIAL:
+    if (sys_status == SYS_RUNNING || sys_status == SYS_STANDBY)
+      handle_smart_knob();
+    break;
+  default:
+    break;
   }
-  if(encoder_counter<55)
-  {
-    encoder_counter+=1;
+}
+
+void MysysControlTaskBegin(void)
+{
+  uint32_t primask = __get_PRIMASK();
+
+  /* Stop the ISR-side outer scheduler before changing its discrete timing. */
+  __disable_irq();
+  control_task_active = 1U;
+  if (primask == 0U) {
+    __enable_irq();
   }
-  else
-  {
-    encoder_counter=0;
+
+  control_filter_alpha =
+      1.0f / (1.0f + 1.0f/(2.0f * PI * (1.0f / CONTROL_TASK_RATE_HZ) * 2.0f));
+  speed_filter_alpha = control_filter_alpha;
+  encoder_counts_to_rpm = 60.0f * CONTROL_TASK_RATE_HZ;
+  encoder_counts_to_rps = 2.0f * PI * CONTROL_TASK_RATE_HZ;
+
+  /* The stored gains are legacy discrete-step coefficients. */
+  PIDDiscreteTimeScaleSet(&pid_ctrl_speed_t, LEGACY_MODE_RATE_HZ / CONTROL_TASK_RATE_HZ);
+  PIDDiscreteTimeScaleSet(&pid_ctrl_pos_t, LEGACY_MODE_RATE_HZ / CONTROL_TASK_RATE_HZ);
+  smart_knob_set_update_rate(CONTROL_TASK_RATE_HZ);
+  if (motor_mode == MODE_DIAL) {
+    init_smart_knob();
+  }
+}
+
+void MysysControlStep(void)
+{
+  Loop_Control();
+  MysysRunModeController();
+}
+
+
+void MysysFastLoopISR(void)
+{
+  __HAL_TIM_CLEAR_IT(&htim1, TIM_IT_UPDATE);
+  Loop_FOC();
+
+  /* During early hardware initialisation there is no ControlTask yet.  Keep
+     the legacy outer scheduler alive only until the task takes ownership. */
+  if (!control_task_active) {
+    counter_loop_control += 3U;
+    if (counter_loop_control >= 10U) {
+      counter_loop_control -= 10U;
+      Loop_Control();
+    }
+
+    pid_compute_counter += 3U;
+    if (pid_compute_counter >= 11U) {
+      pid_compute_counter -= 11U;
+      MysysRunModeController();
+    }
   }
 }
 

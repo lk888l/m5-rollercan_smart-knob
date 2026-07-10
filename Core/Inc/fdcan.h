@@ -78,6 +78,7 @@ void MX_FDCAN1_Init(void);
 /* USER CODE BEGIN Prototypes */
 void user_fdcan_init(void);
 uint8_t FDCAN1_Send_Msg(uint8_t cmd_id, uint16_t option, uint8_t can_id, uint8_t* msg);
+void FDCAN_ProcessPending(void);
 /* USER CODE END Prototypes */
 
 #ifdef __cplusplus

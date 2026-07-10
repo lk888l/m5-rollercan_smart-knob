@@ -5,23 +5,21 @@
 ```text
 通信/菜单写入目标值
   -> speed_point / pos_point / current_point
-  -> TIM1 中断调度
-       -> Loop_FOC
-            -> MotorDriverProcess
-               -> 编码器角度
-               -> Clarke/Park
-               -> 电流 PI
-               -> Inverse Park
-               -> SVM
-               -> TIM1 CCR1/2/3
-            -> MyAdcProcess
-       -> Loop_Control
-            -> 多圈机械角度
-            -> 转速估计
-            -> 电流/电压/温度低通
-            -> 过压/越界/堵转保护
-       -> 模式控制
-            -> speed_pid / pos_pid / current / handle_smart_knob
+  -> ControlTask（1 kHz）
+       -> Loop_Control：角度/速度估计、低通和保护
+       -> 模式控制：speed_pid / pos_pid / current / handle_smart_knob
+       -> 更新 FOC 使用的电流目标
+
+TIM1 update ISR（约 18.67 kHz）
+  -> Loop_FOC
+       -> MotorDriverProcess
+            -> 编码器角度
+            -> Clarke/Park
+            -> 电流 PI
+            -> Inverse Park
+            -> SVM
+            -> TIM1 CCR1/2/3
+       -> MyAdcProcess
 ```
 
 ## FOC 电流环
@@ -66,13 +64,15 @@ FOC 实现在 `MyFile/src/motordriver.c`。
 - `mechanical_angle = 360 * mechanical_turns + encoder_absolute_angle_new`。
 - `mechanical_rad = mechanical_angle * PI / 180`。
 - `speed_encoder_update()` 维护展开后的编码器计数。
-- 计数差低通后换算：
-  - `motor_rpm = diff / 16383 * 336000`
-  - `motor_rps = diff / 16383 * 2016000 * PI / 180`
+- 计数差按 1 kHz 调用率低通后换算：
+  - `motor_rpm = diff / 16383 * (60 * 1000)`
+  - `motor_rps = diff / 16383 * (2 * PI * 1000)`
+
+速度、电流、电压和温度低通的系数已按 1 ms 采样周期重新计算。速度/位置 PID 仍保存原协议中的离散增益，但运行系数按原约 5.09 kHz 到 1 kHz 的周期比例转换：Ki 约乘 5.09，Kd 约除 5.09。
 
 ## 速度模式
 
-速度模式入口在 `mysys_tim1_update_handler()`：
+速度模式入口在 1 kHz `MysysRunModeController()`：
 
 ```text
 MODE_SPEED 且 SYS_RUNNING
@@ -100,7 +100,7 @@ MODE_SPEED 且 SYS_RUNNING
 
 ## 位置模式
 
-位置模式入口：
+位置模式同样由 1 kHz `MysysRunModeController()` 调用：
 
 ```text
 MODE_POS 且 SYS_RUNNING
@@ -137,7 +137,7 @@ MotorDriverSetCurrentReal(current_set)
 
 `current_point` 被限制在 `[-120000, 120000]`，也就是 `[-1200.00, 1200.00]` mA。
 
-TIM1 模式分支里，电流模式主要根据 `ph_crrent_lpf / current_point_float` 控制 RGB 快慢闪状态。
+ControlTask 的电流模式分支主要根据 `ph_crrent_lpf / current_point_float` 控制 RGB 快慢闪状态；目标为零时不会执行除法。
 
 ## Dial/SmartKnob 模式
 
@@ -149,6 +149,7 @@ Dial 模式在 `MyFile/src/smart_knob.c`：
 - 旋转超过 snap point 后更新 `current_position`。
 - 超过速度阈值时输出 0，避免高速时正反馈。
 - 否则通过 `knob_pid()` 计算扭矩并调用 `MotorDriverSetCurrentReal(torque)`。
+- 固定每步滤波 alpha 已按 1 kHz 更新率变换，以保持迁移前的实际时间常数；`knob_pid()` 继续使用 `micros()` 动态计算 `Ts`。
 
 默认配置：
 

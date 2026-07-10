@@ -11,37 +11,42 @@
 
 #define ENCODER_SPI_CS_H ENCODER_SPI_CS_GROUP->BSRR	=	ENCODER_SPI_CS_PIN
 #define ENCODER_SPI_CS_L ENCODER_SPI_CS_GROUP->BRR	=	ENCODER_SPI_CS_PIN
+#define ENCODER_SPI_TIMEOUT_CYCLES 4096U
 
 
 ENCODER_SPI_Signal_Typedef	encoder_spi;
+volatile uint32_t encoder_spi_timeout_count;
 
 	uint16_t data_t[2];
 	uint16_t data_r[2];
 
 uint8_t SPI_TransmitReceive(SPI_HandleTypeDef * hspi, uint16_t TxData, uint16_t *RxData)            
 {
-  volatile uint32_t cnt = 0;
-    
-   while ((hspi->Instance->SR & SPI_SR_TXE) == 0)
-   {
-	;
-   }  
-    hspi->Instance->DR = TxData;
-	                        
-    while ((hspi->Instance->SR & SPI_SR_RXNE)==0) 
-     {
-	;
-   	}  
-        if((hspi->Instance->SR & SPI_SR_RXNE))
-        {
-            *RxData = hspi->Instance->DR;
-            return 0;
-        }
-        cnt++;
-      
-       
-    return 1; 
-	while ((hspi->Instance->SR & SPI_SR_TXE) == 0);                               
+  uint32_t timeout = ENCODER_SPI_TIMEOUT_CYCLES;
+
+  while ((hspi->Instance->SR & SPI_SR_TXE) == 0U) {
+    if (--timeout == 0U) {
+      encoder_spi_timeout_count++;
+      return 1U;
+    }
+  }
+
+  hspi->Instance->DR = TxData;
+
+  timeout = ENCODER_SPI_TIMEOUT_CYCLES;
+  while ((hspi->Instance->SR & SPI_SR_RXNE) == 0U) {
+    if (--timeout == 0U) {
+      /* Never let an absent or not-yet-enabled encoder lock the priority-0
+       * FOC ISR forever.  Re-arm SPI so a later sample can recover. */
+      encoder_spi_timeout_count++;
+      __HAL_SPI_DISABLE(hspi);
+      __HAL_SPI_ENABLE(hspi);
+      return 1U;
+    }
+  }
+
+  *RxData = (uint16_t)hspi->Instance->DR;
+  return 0U;
 }
 
 void EncoderInit(void)
@@ -55,7 +60,6 @@ void EncoderInit(void)
 void EncoderGetData(void)
 {
 
-	uint8_t h_count;
 	data_t[0] = 0x8021;
 	data_t[1] = 0xffff;
 
@@ -63,8 +67,11 @@ void EncoderGetData(void)
 		ENCODER_SPI_CS_L;
 		ENCODER_SPI_CS_L;
 
-		SPI_TransmitReceive(&hspi1, data_t[0], &data_r[0]);
-		SPI_TransmitReceive(&hspi1, data_t[1],&data_r[1]);
+		if (SPI_TransmitReceive(&hspi1, data_t[0], &data_r[0]) != 0U ||
+		    SPI_TransmitReceive(&hspi1, data_t[1], &data_r[1]) != 0U) {
+			ENCODER_SPI_CS_H;
+			return;
+		}
 
 		ENCODER_SPI_CS_H;
 		ENCODER_SPI_CS_H;

@@ -28,6 +28,7 @@
 #include "myadc.h"
 #include "i2c.h"
 #include "ws2812.h"
+#include "app_rtos.h"
 
 FDCAN_TxHeaderTypeDef fdcan1_TxHeader;
 uint8_t can_id = 168;
@@ -138,7 +139,9 @@ void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* fdcanHandle)
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
     /* FDCAN1 interrupt Init */
-    HAL_NVIC_SetPriority(FDCAN1_IT0_IRQn, 1, 0);
+    /* This ISR notifies a FreeRTOS task, so it must be at or below the
+       configured maximum syscall interrupt priority. */
+    HAL_NVIC_SetPriority(FDCAN1_IT0_IRQn, 6, 0);
     HAL_NVIC_EnableIRQ(FDCAN1_IT0_IRQn);
   /* USER CODE BEGIN FDCAN1_MspInit 1 */
 
@@ -306,8 +309,9 @@ uint8_t FDCAN1_Send_Msg(uint8_t cmd_id, uint16_t option, uint8_t can_id, uint8_t
 }
 
 /* FDCAN 接收中断回调函数 */
-void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
+void FDCAN_ProcessPending(void)
 {
+  const uint32_t RxFifo0ITs = FDCAN_IT_RX_FIFO0_NEW_MESSAGE;
   if((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != RESET)
   {
     FDCAN_RxHeaderTypeDef rx_header;
@@ -315,7 +319,7 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 		uint16_t my_tx_option;
     uint8_t motor_mode_temp;
     int32_t int_value_temp;
-    uint8_t i2c_address, i2c_len, i2c_success, is_stop_bit;
+    uint8_t i2c_len, i2c_success, is_stop_bit;
 
     comm_flash_count = 4;
 
@@ -1066,6 +1070,19 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
     }
 
     /* 在这里处理接收到的消息，可以根据 rx_header 中的信息来进行区分和处理 */
+  }
+}
+
+void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
+{
+  (void)hfdcan;
+  if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) == RESET) {
+    return;
+  }
+
+  if (!App_NotifyCanRxFromISR()) {
+    /* Startup fallback before the scheduler is running. */
+    FDCAN_ProcessPending();
   }
 }
 /* USER CODE END 1 */

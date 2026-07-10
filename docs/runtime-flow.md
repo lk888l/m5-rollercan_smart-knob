@@ -4,90 +4,78 @@
 
 `Core/Src/main.c` 的 `main()` 是唯一应用入口。
 
-1. `IAP_Set()` 将应用区 `0x08002000` 的前 48 个向量复制到 SRAM，并把 SRAM remap 到 `0x00000000`。
+1. `IAP_Set()` 将应用区 `0x08002000` 的向量复制到 SRAM，并 remap 到 `0x00000000`。
 2. `HAL_Init()` 初始化 HAL、SysTick 和 Flash 接口。
-3. `SystemClock_Config()` 使用 HSI+PLL，配置 SYSCLK、AHB、APB。
-4. 依次执行 CubeMX 外设初始化：
-   - `MX_GPIO_Init()`
-   - `MX_DMA_Init()`
-   - `MX_ADC1_Init()`
-   - `MX_TIM1_Init()`
-   - `MX_SPI1_Init()`
-   - `MX_TIM3_Init()`
-   - `MX_I2C1_Init()`
-   - `MX_FDCAN1_Init()`
-5. `InitMysys()` 初始化业务系统。
-6. `sk6812_init(PIXEL_MAX)` 为 RGB 灯色缓存分配内存。
-7. `while (1)` 中调用 `LoopMysys()`。
+3. `SystemClock_Config()` 使用 HSI+PLL 配置系统时钟。
+4. 依次初始化 GPIO、DMA、ADC1、TIM1、SPI1、TIM3、I2C1 和 FDCAN1。
+5. `InitMysys()` 完成业务和电机硬件初始化。
+6. `sk6812_init(PIXEL_MAX)` 初始化 RGB 缓冲。
+7. `App_StartScheduler()` 创建全静态 FreeRTOS 对象并启动调度器；正常情况下不返回。
 
-注意：`LoopMysys()` 内部自己也是无限循环，所以 `main()` 的外层 `while` 实际不会重复多次返回。
+## `InitMysys()` 的实时启动顺序
 
-## `InitMysys()` 做什么
+`MyFile/src/mysys.c` 的 `InitMysys()` 必须先准备 FOC 的全部依赖，再开启 TIM1 update IRQ：
 
-`MyFile/src/mysys.c` 的 `InitMysys()` 是业务初始化中心：
+1. 清零角度和控制状态。
+2. `MyADCInit()` 启动 ADC 校准和 circular DMA。
+3. 设置 TIM1 CH4 ADC 触发点。
+4. `MotorDriverInit()` 初始化 FOC 状态。
+5. `EncoderInit()` 使能 TLE5012B 使用的 SPI1。
+6. 启动 TIM1 CH1/CH2/CH3 PWM。
+7. 延时 20 ms 后执行 `MyADCZeroCal()`。
+8. 清除 TIM1 update pending flag，然后开启 update IRQ。
+9. 读取 Flash 配置并初始化 OLED；按键按住上电时可进入阻塞式本地配置菜单。
+10. 初始化 PID、I2C/FDCAN 通信和启动界面。
 
-1. 清零机械角度、目标角度、控制计数器。
-2. `GPIOB->BSRR=1<<1` 使能 DRV8311 内部电流传感器相关引脚。
-3. `MyADCInit()` 启动 ADC1 校准和 DMA 循环采样。
-4. `TIM1->CCR4=995` 设置 TIM1 CH4 作为 ADC 触发点。
-5. 启动 TIM1 CH1/CH2/CH3 三相 PWM。
-6. 打开 TIM1 update 中断，用于 FOC 和外层控制循环调度。
-7. `MotorDriverInit()` 初始化 FOC 电流环状态。
-8. `MyADCZeroCal()` 以当前 ADC 采样作为三相电流零点。
-9. `EncoderInit()` 初始化 TLE5012B SPI 编码器。
-10. `init_flash_data()` 读取或写入默认配置。
-11. `u8g2Init(&u8g2)` 初始化 SSD1306 OLED。
-12. 如果开机时 `SYS_SW` 被按下，则进入配置菜单。
-13. `init_pid()` 根据当前 PID 索引初始化速度环和位置环。
-14. 根据 `comm_type` 启用 I2C、CAN 或 CAN-I2C 双模式。
-15. `u8g2_disp_init()` 显示启动 logo 和基础 UI。
+顺序 4～8 不可随意交换。若 SPI1 启用前进入 `Loop_FOC()`，编码器传输会等不到 RXNE。当前 SPI 轮询虽然已有超时，不再永久锁死，但启动数据仍然无效。
 
-## 主循环 `LoopMysys()`
+## FreeRTOS 运行上下文
 
-主循环不做实时电机控制，它负责慢速任务：
+| 上下文 | 周期/触发 | 职责 |
+| --- | --- | --- |
+| TIM1 update ISR | 约 18.67 kHz | 只运行 `Loop_FOC()`；不调用 FreeRTOS API |
+| ControlTask | 1 kHz + CAN/邮箱唤醒 | `Loop_Control()`、模式控制、保护、SmartKnob、CAN 协议和控制邮箱 |
+| MaintenanceTask | 10 ms | I2C 超时恢复、按钮、OLED、RGB、通信慢速维护 |
+| StorageTask | 20 ms | 电机安全状态下的 Flash 写回 |
+| FDCAN ISR | RX new-message | 只通知 ControlTask |
+| I2C1 ISR/回调 | I2C 事务 | 现阶段仍直接执行 I2C 从机协议，是尚未迁移的例外 |
 
-- 检测 I2C STOP 超时，必要时重新初始化 I2C1。
-- 检测 `flash_data_write_back_flag`，把参数写回 Flash。
-- 检测 `can_change_flag`，重新初始化 CAN 并保存 CAN ID。
-- 扫描按键：
-  - 短按切换 OLED 页面。
-  - 长长按且允许模式切换时，循环切换 `motor_mode`。
-- 更新 OLED 模式标识、页面标识和通信闪烁标识。
-- 根据错误状态强制显示 OVP、JAM、RANGE 页面。
-- 消费外部写入的 RGB 颜色队列。
-- CAN 波特率延迟切换。
-- 根据 `dis_show_flag` 绘制当前页面。
-- 调用 `ws2812_flash()` 输出 RGB 状态灯。
-- 每 1 秒翻转 `running_index` 和 `status_flag`，供屏幕闪烁使用。
+## TIM1 快环
 
-## TIM1 实时调度
-
-TIM1 更新中断入口在 `Core/Src/stm32g4xx_it.c`：
+公开中断入口位于 `Core/Src/stm32g4xx_it.c`：
 
 ```c
 void TIM1_UP_TIM16_IRQHandler(void)
 {
-  mysys_tim1_update_handler();
-  HAL_TIM_IRQHandler(&htim1);
+  MysysFastLoopISR();
 }
 ```
 
-`mysys_tim1_update_handler()` 做三个分频调度：
+TIM1 使用 center-aligned PWM，repetition counter 为 2。PWM 和 ADC 触发周期保持不变，update IRQ 降到约 18.67 kHz。`MysysFastLoopISR()` 每次执行 `Loop_FOC()`。
 
-| 计数器 | 执行动作 | 作用 |
-| --- | --- | --- |
-| `counter_loop_foc` 到 2 | `Loop_FOC()` | 电机 FOC 电流环和 ADC 处理 |
-| `counter_loop_control` 到 9 | `Loop_Control()` | 机械角度、速度、电压、电流、保护检测 |
-| `pid_compute_counter` 到 10 | 模式控制 | 速度 PID、位置 PID、电流状态检查、Dial 手感 |
+调度器启动前，ISR 还会用整数相位累加器短暂运行旧外环；ControlTask 调用 `MysysControlTaskBegin()` 后关闭这条兼容路径。因此稳态时 ISR 不再运行 `Loop_Control()`、速度/位置 PID 或 SmartKnob。
 
-真实频率取决于 TIM1 update 频率。代码结构上，FOC 最快，其次是外层控制，PID/模式逻辑更慢。
+## 1 kHz 控制路径
+
+```text
+ControlTask
+  -> 消费按键/未来生产者提交的控制命令邮箱
+  -> 到达 1 ms 截止时间
+       -> Loop_Control
+            -> 机械角度和速度估计
+            -> 电流/电压/温度低通
+            -> 过压、越界和堵转检测
+       -> MysysRunModeController
+            -> speed_pid / pos_pid / current / handle_smart_knob
+  -> 截止时间预算内处理最多 4 个 CAN 帧
+```
+
+ControlTask 使用绝对 tick 截止时间。若 CAN-I2C 桥接等遗留阻塞操作耗时过长，不会补跑多个过期控制步，而是从下一个真实截止时间继续。
 
 ## 模式状态机
 
-`motor_mode` 定义在 `MyFile/inc/mysys.h`：
-
 | 模式 | 值 | 行为 |
-| --- | --- | --- |
+| --- | ---: | --- |
 | `MODE_SPEED` | 1 | 速度闭环，PID 输出相电流目标 |
 | `MODE_POS` | 2 | 位置闭环，PID 输出相电流目标 |
 | `MODE_CURRENT` | 3 | 通信直接设置电流目标 |
@@ -95,28 +83,29 @@ void TIM1_UP_TIM16_IRQHandler(void)
 | `MODE_SPEED_ERR_PROTECT` | 5 | 速度模式堵转保护态 |
 | `MODE_POS_ERR_PROTECT` | 6 | 位置模式堵转保护态 |
 
-电机驱动底层模式由 `MotorDriverSetMode()` 设置：
+电机驱动底层状态由 `MotorDriverSetMode()` 设置，包括 OFF、RUN 和编码器校准模式。
 
-| 底层模式 | 行为 |
-| --- | --- |
-| `MDRV_MODE_OFF` | 关闭驱动输出、清 PI 积分、根据错误设置 `sys_status` |
-| `MDRV_MODE_RUN` | 使能驱动输出、电流环闭环运行、`sys_status=SYS_RUNNING` |
-| `MDRV_MODE_ENC_CAL` | 进入编码器校准，注入固定电角度电流，完成后自动回到 OFF |
-
-## 外部命令进入系统的路径
+## 外部命令路径
 
 ```text
-I2C 主机写寄存器
-  -> I2C1_EV_IRQHandler
-  -> i2c1_event_irq_handler
-  -> Slave_Complete_Callback
-  -> 改 motor_mode / setpoint / PID / Flash / RGB
-
 CAN 扩展帧
   -> FDCAN1_IT0_IRQHandler
   -> HAL_FDCAN_RxFifo0Callback
-  -> 解析 cmd_id/cmd_para/option
-  -> 本机控制或 I2C 桥接
+  -> App_NotifyCanRxFromISR
+  -> ControlTask / FDCAN_ProcessPending
+  -> 修改 mode / setpoint / PID / protection state
+
+按键长按
+  -> MaintenanceTask / LoopMysysOnce
+  -> App_PostControlCommand
+  -> 静态控制命令邮箱
+  -> ControlTask / MysysCycleMode
+
+I2C 主机写寄存器（暂未迁移）
+  -> I2C1_EV_IRQHandler
+  -> i2c1_event_irq_handler
+  -> Slave_Complete_Callback
+  -> 直接修改控制状态
 ```
 
-这两条路径最终都会修改 `mysys.c` 中的全局状态，实时控制则在 TIM1 中断里读取这些状态。
+最终结构中，I2C 也应只解码事务并提交控制命令；本阶段按计划不深化 I2C 电机桥接。

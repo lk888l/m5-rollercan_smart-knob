@@ -27,19 +27,20 @@
 
 - 系统状态中心。
 - PID 参数、目标值、保护状态、通信状态的全局定义。
-- 业务初始化、主循环和 TIM1 实时调度。
+- 业务初始化、ControlTask 控制步和 TIM1 FOC 快环。
 
 关键函数：
 
 | 函数 | 运行方式 |
 | --- | --- |
 | `InitMysys()` | 上电初始化 ADC、PWM、电机、编码器、Flash、OLED、通信 |
-| `LoopMysys()` | 主循环慢速任务 |
-| `Loop_FOC()` | TIM1 中断分频调用，运行 FOC 和 ADC 处理 |
-| `Loop_Control()` | TIM1 中断分频调用，计算机械状态和保护 |
-| `speed_pid()` | 速度模式外环，输出电流目标 |
-| `pos_pid()` | 位置模式外环，输出电流目标 |
-| `mysys_tim1_update_handler()` | TIM1 更新中断 helper |
+| `LoopMysysOnce()` | MaintenanceTask 调用的慢速单步函数 |
+| `MysysStorageOnce()` | StorageTask 调用的安全写回单步函数 |
+| `Loop_FOC()` | 约 18.67 kHz TIM1 ISR 调用，运行 FOC 和 ADC 处理 |
+| `Loop_Control()` | 1 kHz ControlTask 调用，计算机械状态和保护 |
+| `MysysControlStep()` | 1 kHz 外环、模式状态机和 SmartKnob 入口 |
+| `MysysFastLoopISR()` | TIM1 update ISR helper |
+| `speed_pid()` / `pos_pid()` | ControlTask 中的速度/位置外环，输出电流目标 |
 | `crc8_MAXIM()` | 旧串口协议遗留 CRC helper |
 
 ## `MyFile/src/motordriver.c`
@@ -284,7 +285,7 @@
 维护重点：
 
 - 公开 IRQ 函数名应只在这个文件中定义。
-- 业务逻辑通过 helper 进入，例如 `mysys_tim1_update_handler()`、`i2c1_event_irq_handler()`。
+- 业务逻辑通过 helper 进入，例如 `MysysFastLoopISR()`、`i2c1_event_irq_handler()`。
 
 ## `U8g2_lib`
 

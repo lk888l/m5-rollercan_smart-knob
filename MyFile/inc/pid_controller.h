@@ -104,6 +104,10 @@ typedef struct
     float alteredKp;
     float alteredKi;
     float alteredKd;
+
+    /* Ratio between the new and legacy controller execution periods.  The
+       protocol gains remain in their legacy discrete-step units. */
+    float discreteTimeScale;
     
     // 
     // The Integral Term
@@ -303,7 +307,8 @@ extern void PIDControllerDirectionSet(PIDControl *pid,
 // Returns:
 //      Nothing.
 // 
-extern void PIDSampleTimeSet(PIDControl *pid, float sampleTimeSeconds);                                                       									  									  									   
+extern void PIDSampleTimeSet(PIDControl *pid, float sampleTimeSeconds);                                                       									  									   
+extern void PIDDiscreteTimeScaleSet(PIDControl *pid, float scale);
 
 // 
 // Basic Set and Get Functions for PID Parameters

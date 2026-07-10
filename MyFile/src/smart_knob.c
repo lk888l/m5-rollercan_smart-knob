@@ -32,7 +32,10 @@
  */
 #define SMART_KNOB_MAX_INPUT_SPEED_RAD_S 80.0f
 #define SMART_KNOB_MIN_INPUT_STEP_RAD     (3.0f * PI / 180.0f)
-#define SMART_KNOB_POSITION_FILTER_ALPHA  0.15f
+#define SMART_KNOB_POSITION_FILTER_ALPHA_BASE  0.15f
+#define SMART_KNOB_IDLE_VELOCITY_ALPHA_BASE    0.001f
+#define SMART_KNOB_IDLE_CORRECTION_ALPHA_BASE  0.0005f
+#define SMART_KNOB_LEGACY_UPDATE_RATE_HZ       (56000.0f / 11.0f)
 #define SMART_KNOB_SETTLE_TIME_MS          300U
 #define SMART_KNOB_D_ERROR_DEADBAND_RAD    (0.15f * PI / 180.0f)
 #define SMART_KNOB_MAX_D_ERROR_RAD_S       8.0f
@@ -40,11 +43,12 @@
 float DEAD_ZONE_DETENT_PERCENT = 0.2;
 float DEAD_ZONE_RAD = 1 * PI / 180;
 
-float IDLE_VELOCITY_EWMA_ALPHA = 0.001;
+float IDLE_VELOCITY_EWMA_ALPHA = SMART_KNOB_IDLE_VELOCITY_ALPHA_BASE;
 float IDLE_VELOCITY_RAD_PER_SEC = 0.05;
 uint32_t IDLE_CORRECTION_DELAY_MILLIS = 500;
 float IDLE_CORRECTION_MAX_ANGLE_RAD = 5 * PI / 180;
-float IDLE_CORRECTION_RATE_ALPHA = 0.0005;
+float IDLE_CORRECTION_RATE_ALPHA = SMART_KNOB_IDLE_CORRECTION_ALPHA_BASE;
+static float smart_knob_position_filter_alpha = SMART_KNOB_POSITION_FILTER_ALPHA_BASE;
 
 int32_t current_position = 0;
 float latest_sub_position_unit = 0;
@@ -127,7 +131,7 @@ static float smart_knob_get_stable_position(void)
     smart_knob_last_sample_us = now_us;
     if (fabsf(raw_delta_rad) <= max_delta_rad) {
         smart_knob_last_raw_position_rad = raw_position_rad;
-        smart_knob_position_rad += SMART_KNOB_POSITION_FILTER_ALPHA *
+        smart_knob_position_rad += smart_knob_position_filter_alpha *
                                    (raw_position_rad - smart_knob_position_rad);
         smart_knob_sample_valid = true;
     } else {
@@ -135,6 +139,25 @@ static float smart_knob_get_stable_position(void)
     }
 
     return smart_knob_position_rad;
+}
+
+void smart_knob_set_update_rate(float update_rate_hz)
+{
+    float period_ratio;
+
+    if (update_rate_hz <= 0.0f) {
+        return;
+    }
+
+    /* Preserve the real-time pole of filters that were originally expressed
+       as a fixed alpha per 5.09 kHz iteration. */
+    period_ratio = SMART_KNOB_LEGACY_UPDATE_RATE_HZ / update_rate_hz;
+    smart_knob_position_filter_alpha =
+        1.0f - powf(1.0f - SMART_KNOB_POSITION_FILTER_ALPHA_BASE, period_ratio);
+    IDLE_VELOCITY_EWMA_ALPHA =
+        1.0f - powf(1.0f - SMART_KNOB_IDLE_VELOCITY_ALPHA_BASE, period_ratio);
+    IDLE_CORRECTION_RATE_ALPHA =
+        1.0f - powf(1.0f - SMART_KNOB_IDLE_CORRECTION_ALPHA_BASE, period_ratio);
 }
 
 float Ts;

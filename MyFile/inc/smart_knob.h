@@ -124,5 +124,6 @@ extern int32_t current_position;
 
 void init_smart_knob(void);
 void handle_smart_knob(void);
+void smart_knob_set_update_rate(float update_rate_hz);
 
 #endif

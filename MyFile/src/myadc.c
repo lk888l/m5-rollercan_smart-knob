@@ -32,6 +32,9 @@ void MyADCInit(void)
 {
     HAL_ADCEx_Calibration_Start(&hadc1,ADC_SINGLE_ENDED);
     HAL_ADC_Start_DMA(&hadc1,(uint32_t *)adc1_convbuf, 6);
+    /* The control ISR polls the circular DMA buffer.  Half/full transfer
+       callbacks are unused and would otherwise create high-rate IRQ traffic. */
+    __HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_HT | DMA_IT_TC);
 
     ia=0;ib=0;ic=0;
    
