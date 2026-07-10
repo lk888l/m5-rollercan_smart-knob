@@ -68,10 +68,10 @@ Flash 读写在 `Core/Src/flash.c`：
 | I2C | 写 `0xF2 = 1` 保存编码器 offset |
 | CAN | `cmd_id=10` 设置 `flash_data_write_back_flag` |
 | CAN | `FUNC_SAVE_FLASH` 写非 0 |
-| CAN | 修改 CAN ID 后主循环检测 `can_change_flag` |
+| CAN | CommunicationTask 完成 CAN ID/波特率重配置后设置延后写回标志 |
 | OLED 菜单 | 确认 COM、I2C ADDR、CAN ID、PID 组、BPS、RGB、JAM、RANGE 等设置 |
 
-主循环会检测 `flash_data_write_back_flag`，这样 CAN 中断里不直接擦写 Flash。
+StorageTask 会检测 `flash_data_write_back_flag`，并在电机不处于 `SYS_RUNNING` 时写入，因此 CAN/CommunicationTask 不直接擦写 Flash。
 
 ## 写入注意事项
 

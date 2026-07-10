@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-当前版本已完成第三阶段实时边界收口：TIM1 中断只保留 FOC 快环，原外环、保护状态机和 SmartKnob 已迁移到 1 kHz ControlTask；ControlTask 与 FOC ISR 之间通过带序号的命令/传感器快照交换数据，电流 PI 和驱动硬件状态由 FOC ISR 独占。
+当前版本已完成第四阶段通信隔离：TIM1 中断只保留 FOC 快环；ControlTask 独占外环和本机业务状态；CommunicationTask 独占 FDCAN FIFO、帧发送和阻塞式 CAN-I2C 桥接。ControlTask 与 FOC ISR 之间继续通过带序号的命令/传感器快照交换数据。
 
 已经完成：
 
@@ -12,7 +12,7 @@
 - FreeRTOS tick 为 1 kHz；SysTick 同时维护 HAL tick。
 - TIM1 repetition counter 从 0 改为 2，update IRQ 从约 56 kHz 降到约 18.67 kHz。
 - ADC DMA 保持 circular 搬运，但关闭未使用的 half-transfer 和 transfer-complete IRQ。
-- FDCAN ISR 只唤醒 ControlTask，不再在中断中解析协议或发送回复。
+- FDCAN ISR 只唤醒 CommunicationTask，不在中断中读取 FIFO、解析协议或发送回复。
 - `Loop_Control()`、速度/位置 PID、保护状态机和 SmartKnob 统一在 1 kHz ControlTask 中执行。
 - 按键模式切换通过容量为 8 的静态控制命令邮箱提交，不再由 MaintenanceTask 直接修改 `motor_mode`。
 - Flash 写回拆到 StorageTask，并在 `SYS_RUNNING` 时延后。
@@ -20,29 +20,35 @@
 - `FastControlCommandSnapshot` 将驱动模式和 Iq 目标提交到 FOC 周期边界执行。
 - `FastSensorSnapshot` 将编码器、电流、母线 ADC 和温度作为一致样本发布给 ControlTask。
 - DWT CYCCNT 记录 FOC、ControlTask、CAN 单帧耗时和 1 kHz 周期抖动。
-- 三个应用任务每秒记录一次实际 stack high-water mark。
+- 四个应用任务每秒记录一次实际 stack high-water mark。
+- FDCAN ISR 改为唤醒 CommunicationTask，不再直接唤醒 ControlTask。
+- 本机 CAN 命令经固定容量队列交给 ControlTask，回复再经独立静态队列返回 CommunicationTask。
+- CAN-I2C 桥接命令 `19–22` 只在 CommunicationTask 执行，不再阻塞 1 kHz 控制任务。
+- FDCAN TX 只由 CommunicationTask 调用；启动调度器前的同步兼容路径除外。
+- CAN ID/波特率重配置也由 CommunicationTask 执行；StorageTask 只消费持久化标志。
 
 ## 任务配置
 
 | 任务 | 优先级 | 静态栈 | 触发方式 | 当前职责 |
 | --- | ---: | ---: | --- | --- |
-| ControlTask | 5 | 896 words | 1 ms 绝对截止时间；CAN/邮箱可提前唤醒 | 外环、PID、保护、SmartKnob、控制命令、CAN 协议 |
+| ControlTask | 5 | 896 words | 1 ms 绝对截止时间；控制邮箱可提前唤醒 | 外环、PID、保护、SmartKnob 和本机命令执行 |
+| CommunicationTask | 3 | 768 words | FDCAN ISR / TX 回复 notification | RX FIFO、帧解码、TX 和 CAN-I2C 桥接 |
 | MaintenanceTask | 2 | 768 words | 10 ms `vTaskDelayUntil` | 按键、OLED、RGB、I2C 恢复和慢速维护 |
 | StorageTask | 1 | 384 words | 20 ms `vTaskDelayUntil` | 安全状态下的 Flash 写回 |
 | IdleTask | 0 | 128 words | FreeRTOS 内核 | 空闲任务 |
 
 任务栈单位是 FreeRTOS `StackType_t`，在 Cortex-M4F 上一个 word 为 4 字节。当前栈按迁移阶段保守配置，上板后应使用 `uxTaskGetStackHighWaterMark()` 测量再收紧。
 
-工程没有 CommunicationTask。CAN 协议有修改控制状态的能力，所以协议解析与控制步放在同一个 ControlTask 中，避免再引入锁或跨任务共享 PID 状态。
+CommunicationTask 只拥有传输和桥接，不直接修改本机控制状态。本机命令由 ControlTask 执行，因此不需要给 PID、模式和保护状态加互斥锁。
 
 ## 1 kHz ControlTask 调度
 
 ControlTask 使用 FreeRTOS tick 的绝对 1 ms 截止时间，不使用软件定时器：
 
-1. 等待下一个控制截止时间；CAN RX 或控制命令可以用 task notification 提前唤醒。
-2. 先消费固定容量控制命令邮箱。
-3. 到达截止时间时执行一次 `MysysControlStep()`，不补跑陈旧控制周期。
-4. 在下一个截止时间前最多处理 4 个 CAN 帧；每帧后重新检查 tick，避免无界清空 FIFO 挤占控制步。
+1. 等待下一个控制截止时间；控制命令可用 task notification 提前唤醒。
+2. 到达截止时间时优先执行一次 `MysysControlStep()`，不补跑陈旧控制周期。
+3. 在下一个截止时间前最多执行 4 条本机命令；剩余命令保留到下次唤醒。
+4. 命令产生的 CAN 回复只写入静态 TX 队列，不在 ControlTask 调用 HAL FDCAN。
 
 以下全局计数器可直接在调试器观察：
 
@@ -55,8 +61,35 @@ ControlTask 使用 FreeRTOS tick 的绝对 1 ms 截止时间，不使用软件�
 | `app_control_stack_min_words` | ControlTask 最小剩余栈 | 大于安全余量 |
 | `app_maintenance_stack_min_words` | MaintenanceTask 最小剩余栈 | 大于安全余量 |
 | `app_storage_stack_min_words` | StorageTask 最小剩余栈 | 大于安全余量 |
+| `app_communication_stack_min_words` | CommunicationTask 最小剩余栈 | 大于安全余量 |
+| `app_can_rx_count` | CommunicationTask 读取的总帧数 | 随总线流量增加 |
+| `app_can_bridge_count` | 已执行的桥接帧数 | 仅使用桥接时增加 |
+| `app_can_rx_drop_count` | HAL 读取或本机命令入队失败 | 应保持 0 |
+| `app_can_tx_drop_count` | 回复队列或硬件 TX 入队失败 | 应保持 0 |
+| `app_can_hw_fifo_loss_count` | FDCAN 硬件报告 FIFO message lost | 必须保持 0 |
+| `app_can_rx_fifo_high_water` | RX FIFO 观测到的最高填充量 | 应低于硬件容量 |
+| `app_can_control_queue_high_water` | 本机控制队列最高占用 | 应小于 8 |
+| `app_can_response_queue_high_water` | 回复队列最高占用 | 应小于 8 |
 
-CAN-I2C 桥接命令仍可能执行阻塞式 I2C 操作，这是本阶段按要求暂不深化的例外；若使用该命令，应预期 deadline miss 计数可能增加。
+CAN-I2C 桥接命令仍使用阻塞式 I2C，但已经隔离到优先级 3 的 CommunicationTask。桥接可能增加 CAN FIFO 压力和自身响应延迟，但不应再增加 ControlTask deadline miss。
+
+## CAN 任务和静态通道
+
+```text
+FDCAN ISR
+  -> notify CommunicationTask
+  -> FDCAN_ReadPendingCommand
+       -> command 19-22: CommunicationTask 执行桥接并直接回复
+       -> other commands: enqueue ControlCommand
+  -> ControlTask 在控制截止时间之后执行本机命令
+  -> enqueue CanProtocolResponse
+  -> notify CommunicationTask
+  -> FDCAN_SendResponse
+```
+
+命令和回复队列容量均为 8。CommunicationTask 每次最多读取 16 帧；ControlTask 每个 pass 最多执行 4 条本机命令。FDCAN new-message 和 message-lost notification 都已启用。
+
+CAN ID 或波特率变更的回复发送完成后，CommunicationTask 才会 DeInit/重新初始化 FDCAN，并设置延后写回标志。MaintenanceTask 和 StorageTask 不再操作 FDCAN handle。
 
 ## FOC / ControlTask 双向快照
 
@@ -86,6 +119,7 @@ STM32G431 当前为 168 MHz，因此周期值除以 168 即约为微秒：
 | `runtime_control_period_max_cycles` | 1 kHz 控制起点最长周期 | 接近 168000 cycles |
 | `runtime_control_jitter_max_cycles` | 相对 1 ms 的最大绝对周期偏差 | 越小越好 |
 | `runtime_can_frame_max_cycles` | 单帧 CAN 协议最大处理耗时 | 不应逼近 168000 cycles |
+| `runtime_can_bridge_max_cycles` | CommunicationTask 单条桥接最大耗时 | 可超过 1 ms，但不得影响控制 deadline |
 
 ## 控制周期重新离散化
 
@@ -124,7 +158,7 @@ ADC DMA 保持 circular 模式，FOC 直接读取 DMA 缓冲区。当前没有�
 
 ### FDCAN
 
-FDCAN IRQ 优先级为 6，满足 `configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY=5` 的约束。ISR 只调用 `App_NotifyCanRxFromISR()`；协议解析和回复由 ControlTask 完成。调度器启动前保留同步处理作为启动兼容路径。
+FDCAN IRQ 优先级为 6，满足 `configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY=5` 的约束。ISR 只调用 `App_NotifyCanRxFromISR()` 并记录硬件 FIFO loss；FIFO 读取和回复由 CommunicationTask 完成。本机状态修改仍由 ControlTask 完成。调度器启动前保留同步处理作为启动兼容路径。
 
 ## 单写者边界
 
@@ -138,7 +172,8 @@ FDCAN IRQ 优先级为 6，满足 `configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY=
 
 当前已有的生产者路径：
 
-- FDCAN ISR：只通知 ControlTask；CAN FIFO 在 ControlTask 中解析。
+- FDCAN ISR：只通知 CommunicationTask。
+- CommunicationTask：解码帧并排队，不直接修改本机 PID、模式或保护状态。
 - MaintenanceTask 按键：向静态邮箱提交 `APP_CONTROL_COMMAND_CYCLE_MODE`。
 - 开机阻塞式 OLED 配置菜单：发生在调度器启动前，可直接设置启动配置。
 
@@ -153,11 +188,12 @@ I2C 从机 `Slave_Complete_Callback()` 仍会直接写控制状态，是明确�
 3. `runtime_foc_max_cycles` 明显小于约 9000，`runtime_control_period_min/max_cycles` 围绕 168000。
 4. 比较空闲、连续 CAN 和四种模式下的 `runtime_control_jitter_max_cycles`。
 5. `fast_sensor_read_failure_count` 保持 0；ADC DMA 持续更新且 `encoder_spi_timeout_count` 不增加。
-6. 连续 CAN 通信无 RX FIFO overflow，回复延迟稳定，`app_control_can_frame_count` 与接收量一致。
-7. `app_control_command_drop_count` 保持 0，长按切换模式每次只切换一次。
-8. 分别验证速度、位置、电流、Dial/SmartKnob 四种模式；重点确认启停瞬间没有非预期电流。
-9. 验证编码器校准、过压、位置越界、速度堵转、位置堵转和自动恢复状态机。
-10. 运行各模式一段时间后读取三个 `app_*_stack_min_words`，再决定是否缩栈。
+6. 连续 CAN 通信时四个 drop/loss 计数保持 0，三个 queue/FIFO high-water 不触顶。
+7. 本机控制流量下 `runtime_can_frame_max_cycles` 稳定；桥接流量只影响 `runtime_can_bridge_max_cycles`。
+8. `app_control_command_drop_count` 保持 0，长按切换模式每次只切换一次。
+9. 分别验证速度、位置、电流、Dial/SmartKnob 四种模式；重点确认启停瞬间没有非预期电流。
+10. 验证编码器校准、过压、位置越界、速度堵转、位置堵转和自动恢复状态机。
+11. 运行各模式和 CAN 压力一段时间后读取四个 `app_*_stack_min_words`，再决定是否缩栈。
 
 ## 构建结果
 
@@ -167,12 +203,12 @@ I2C 从机 `Slave_Complete_Callback()` 仍会直接写控制状态，是明确�
 text 82832, data 1296, bss 5376
 ```
 
-当前第三阶段 Release：
+当前第四阶段 Release：
 
 ```text
-text 91184, data 1348, bss 14940
-RAM   16288 / 32576 bytes (50.00%)
-Flash 92544 / 112640 bytes (82.16%)
+text 92200, data 1352, bss 18376
+RAM   19728 / 32576 bytes (60.56%)
+Flash 93564 / 112640 bytes (83.06%)
 ```
 
-当前 Debug 也能链接，但 Flash 已占 `105476 / 112640` 字节（93.64%）。上板行为、DWT 最大值和 SmartKnob 手感应以 Release 固件为准。
+当前 Debug 也能链接，但 Flash 已占 `106352 / 112640` 字节（94.42%）。上板行为、CAN 压力、DWT 最大值和 SmartKnob 手感应以 Release 固件为准。

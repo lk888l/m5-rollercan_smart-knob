@@ -674,12 +674,6 @@ void LoopMysysOnce(void)
           }
           rgb_color_buffer_index = 0;
         }         
-        if (change_baudrate_flag && (HAL_GetTick() - change_baudrate_delay >= 300)) {
-          HAL_FDCAN_DeInit(&hfdcan1);
-          user_fdcan_init();
-          change_baudrate_flag = 0;
-        }         
-
         switch (dis_show_flag)
         {
         case DIS_CHAR:
@@ -732,15 +726,6 @@ void MysysStorageOnce(void)
     flash_data_write_back_flag = 0;
   }
 
-  if (can_change_flag) {
-    user_fdcan_init();
-    if (sys_status != SYS_RUNNING) {
-      flash_data_write_back();
-    } else {
-      flash_data_write_back_flag = 1;
-    }
-    can_change_flag = 0;
-  }
 }
 
 void Loop_FOC(void)

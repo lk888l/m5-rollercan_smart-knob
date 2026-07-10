@@ -28,6 +28,7 @@ volatile uint32_t runtime_control_period_min_cycles = UINT32_MAX;
 volatile uint32_t runtime_control_period_max_cycles = 0U;
 volatile uint32_t runtime_control_jitter_max_cycles = 0U;
 volatile uint32_t runtime_can_frame_max_cycles = 0U;
+volatile uint32_t runtime_can_bridge_max_cycles = 0U;
 }
 
 extern "C" void RuntimeMetricsInit(void)
@@ -96,4 +97,13 @@ extern "C" void RuntimeMetricsRecordCanFrame(uint32_t start_cycles)
     }
 
     UpdateMaximum(runtime_can_frame_max_cycles, DWT->CYCCNT - start_cycles);
+}
+
+extern "C" void RuntimeMetricsRecordCanBridge(uint32_t start_cycles)
+{
+    if (!metrics_enabled) {
+        return;
+    }
+
+    UpdateMaximum(runtime_can_bridge_max_cycles, DWT->CYCCNT - start_cycles);
 }

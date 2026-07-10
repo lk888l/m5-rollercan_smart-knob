@@ -29,11 +29,13 @@ extern "C" {
 #include "main.h"
 
 /* USER CODE BEGIN Includes */
+#include "can_protocol.h"
+
 extern uint8_t can_id;
-extern uint8_t can_change_flag;
-extern uint8_t flash_data_write_back_flag;
-extern uint8_t change_baudrate_flag;
-extern uint32_t change_baudrate_delay;
+extern volatile uint8_t can_change_flag;
+extern volatile uint8_t flash_data_write_back_flag;
+extern volatile uint8_t change_baudrate_flag;
+extern volatile uint32_t change_baudrate_delay;
 /* USER CODE END Includes */
 
 extern FDCAN_HandleTypeDef hfdcan1;
@@ -78,6 +80,11 @@ void MX_FDCAN1_Init(void);
 /* USER CODE BEGIN Prototypes */
 void user_fdcan_init(void);
 uint8_t FDCAN1_Send_Msg(uint8_t cmd_id, uint16_t option, uint8_t can_id, uint8_t* msg);
+bool FDCAN_ReadPendingCommand(CanProtocolCommand *command);
+bool FDCAN_IsBridgeCommand(const CanProtocolCommand *command);
+bool FDCAN_ProcessCommand(const CanProtocolCommand *command, CanProtocolResponse *response);
+uint8_t FDCAN_SendResponse(const CanProtocolResponse *response);
+void FDCAN_ServiceReconfiguration(void);
 void FDCAN_ProcessPending(void);
 /* USER CODE END Prototypes */
 

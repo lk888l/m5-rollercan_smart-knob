@@ -34,10 +34,11 @@
 | 上下文 | 周期/触发 | 职责 |
 | --- | --- | --- |
 | TIM1 update ISR | 约 18.67 kHz | 只运行 `Loop_FOC()`；不调用 FreeRTOS API |
-| ControlTask | 1 kHz + CAN/邮箱唤醒 | `Loop_Control()`、模式控制、保护、SmartKnob、CAN 协议和控制邮箱 |
+| ControlTask | 1 kHz + 控制邮箱唤醒 | `Loop_Control()`、模式控制、保护、SmartKnob 和本机命令执行 |
+| CommunicationTask | FDCAN/回复唤醒 | 读取 RX FIFO、发送回复、隔离 CAN-I2C 桥接 |
 | MaintenanceTask | 10 ms | I2C 超时恢复、按钮、OLED、RGB、通信慢速维护 |
 | StorageTask | 20 ms | 电机安全状态下的 Flash 写回 |
-| FDCAN ISR | RX new-message | 只通知 ControlTask |
+| FDCAN ISR | RX new-message / message-lost | 只通知 CommunicationTask 并记录硬件 loss |
 | I2C1 ISR/回调 | I2C 事务 | 现阶段仍直接执行 I2C 从机协议，是尚未迁移的例外 |
 
 ## TIM1 快环
@@ -92,8 +93,11 @@ CAN 扩展帧
   -> FDCAN1_IT0_IRQHandler
   -> HAL_FDCAN_RxFifo0Callback
   -> App_NotifyCanRxFromISR
-  -> ControlTask / FDCAN_ProcessPending
-  -> 修改 mode / setpoint / PID / protection state
+  -> CommunicationTask / FDCAN_ReadPendingCommand
+  -> 本机命令静态队列
+  -> ControlTask / FDCAN_ProcessCommand
+  -> 回复静态队列
+  -> CommunicationTask / FDCAN_SendResponse
 
 按键长按
   -> MaintenanceTask / LoopMysysOnce

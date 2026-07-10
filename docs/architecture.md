@@ -18,13 +18,14 @@ ROLLERCAN 固件可以按四层理解：
 
 | 上下文 | 入口 | 主要动作 |
 | --- | --- | --- |
-| ControlTask | `App/src/app_rtos.cpp` | 1 kHz 外环、保护、速度/位置 PID、SmartKnob、CAN 协议和控制命令 |
+| ControlTask | `App/src/app_rtos.cpp` | 1 kHz 外环、保护、速度/位置 PID、SmartKnob 和本机命令执行 |
+| CommunicationTask | `App/src/app_rtos.cpp` | FDCAN FIFO、帧解码、回复发送和 CAN-I2C 桥接 |
 | MaintenanceTask | `App/src/app_rtos.cpp` -> `LoopMysysOnce()` | I2C 超时恢复、按钮扫描、OLED 刷新、WS2812 灯效 |
 | StorageTask | `App/src/app_rtos.cpp` -> `MysysStorageOnce()` | 安全状态下的 Flash 写回 |
 | TIM1 更新中断 | `TIM1_UP_TIM16_IRQHandler()` -> `MysysFastLoopISR()` | 约 18.67 kHz FOC 和 ADC 数据处理 |
 | I2C1 事件中断 | `I2C1_EV_IRQHandler()` -> `i2c1_event_irq_handler()` | I2C 从机收发、事务完成回调到 `Slave_Complete_Callback()` |
 | I2C1 错误中断 | `I2C1_ER_IRQHandler()` -> `i2c1_error_irq_handler()` | 复位并重新初始化 I2C 从机 |
-| FDCAN 接收中断 | `FDCAN1_IT0_IRQHandler()` -> HAL callback | 只通知 ControlTask；不解析协议 |
+| FDCAN 接收中断 | `FDCAN1_IT0_IRQHandler()` -> HAL callback | 只通知 CommunicationTask 并记录 FIFO loss |
 | DMA 中断 | TIM3 CH2 DMA 等 | WS2812 PWM-DMA 发送完成；ADC DMA HT/TC IRQ 已关闭 |
 
 ## 核心数据流
@@ -43,7 +44,9 @@ TLE5012B SPI -> EncoderGetAngle
   -> FOC Park/Clarke/SVM
   -> TIM1 CCR1/CCR2/CCR3
 
-CAN 命令 -> FDCAN ISR notification -> ControlTask
+CAN 命令 -> FDCAN ISR notification -> CommunicationTask
+  -> 本机命令静态队列 -> ControlTask
+  -> 回复静态队列 -> CommunicationTask -> FDCAN TX
 按键命令 -> 静态控制邮箱 -> ControlTask
   -> motor_output / motor_mode / setpoint / PID / protection flags
   -> MotorDriverSetMode / MotorDriverSetCurrentReal

@@ -170,8 +170,10 @@
 运行：
 
 - `user_fdcan_init()` 按 `can_id` 和 `bps_index` 设置 filter 和波特率。
-- `HAL_FDCAN_RxFifo0Callback()` 在 CAN RX FIFO0 中断回调中解析命令。
-- 对本机控制直接改 `mysys.c` 全局状态，对保存/换 ID/换波特率使用主循环延迟处理。
+- `HAL_FDCAN_RxFifo0Callback()` 只通知 CommunicationTask 并记录 FIFO loss。
+- CommunicationTask 调用 `FDCAN_ReadPendingCommand()`，将本机命令排队给 ControlTask；命令 `19–22` 的桥接操作留在 CommunicationTask。
+- ControlTask 调用 `FDCAN_ProcessCommand()` 修改本机状态，并将回复排队回 CommunicationTask。
+- CAN ID/波特率重配置由 CommunicationTask 执行，Flash 保存由 StorageTask 延后完成。
 
 ## `Core/Src/flash.c`
 
