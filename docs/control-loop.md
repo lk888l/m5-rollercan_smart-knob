@@ -145,25 +145,17 @@ ControlTask 的电流模式分支主要根据 `ph_crrent_lpf / current_point_flo
 
 ## Dial/SmartKnob 模式
 
-Dial 模式在 `MyFile/src/smart_knob.c`：
+Dial 模式由 `MyFile/src/smart_knob.c` 和 `MyFile/src/smart_knob_modes.c` 共同实现：
 
-- `init_smart_knob()` 将当前机械弧度设为 detent 中心，并重置 PID 状态。
-- `handle_smart_knob()` 使用 `mechanical_rad`、`motor_rps` 和 `current_detent_center` 计算力反馈。
-- 低速且靠近 detent 时会慢慢修正 detent 中心。
-- 旋转超过 snap point 后更新 `current_position`。
-- 超过速度阈值时输出 0，避免高速时正反馈。
-- 否则通过 `knob_pid()` 计算扭矩并调用 `MotorDriverSetCurrentReal(torque)`。
-- 固定每步滤波 alpha 已按 1 kHz 更新率变换，以保持迁移前的实际时间常数；`knob_pid()` 继续使用 `micros()` 动态计算 `Ts`。
+- `init_smart_knob()` 在首次进入时加载编译期默认预设，后续进入时保留活动预设并重新锚定 detent 中心。
+- `handle_smart_knob()` 以 1 kHz 使用本机 `mechanical_rad` 和 `motor_rps` 更新 detent/endstop 状态机。
+- 触感输出使用 `(P * position_error - D * velocity) * current_scale`，再叠加摩擦补偿和可选双相 click 电流。
+- 电流同时受模式限幅、0–1000 ‰ 安全比例和底层 1.2 A 硬限制约束，最后调用 `MotorDriverSetCurrentReal()`。
+- 低速时慢慢修正 detent 中心；编码器跳变、进入模式后的稳定期以及高速转动时输出 0。
+- `smart_knob_modes.h` 的 `SMART_KNOB_DEFAULT_MODE` 是唯一的默认预设选择点；各预设配置互相独立。
+- CAN 参数切换模式或修改手感仍在 ControlTask 执行；CommunicationTask 只读取一致快照并主动发送遥测。
 
-默认配置：
-
-| 字段 | 默认值 | 说明 |
-| --- | --- | --- |
-| `min_position` | 0 | 下限 |
-| `max_position` | -1 | 小于 min，表示无界 |
-| `position_width_radians` | 约 8.23 度 | detent 间距 |
-| `detent_strength_unit` | 2 | detent 强度 |
-| `snap_point` | 1.1 | 越过该比例后换档 |
+模式表、CAN function、参数缩放和主动遥测帧详见 [固件 SmartKnob](smartknob-firmware.md)。
 
 ## 保护逻辑
 

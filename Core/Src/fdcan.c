@@ -362,6 +362,36 @@ uint8_t FDCAN_SendResponse(const CanProtocolResponse *response)
                          response->destination_id, (uint8_t *)response->data);
 }
 
+bool FDCAN_SmartKnobTelemetryActive(void)
+{
+  return (comm_type == COMM_TYPE_CAN || comm_type == COMM_TYPE_CAN_I2C) &&
+         smart_knob_telemetry_enabled();
+}
+
+uint8_t FDCAN_ServiceSmartKnobTelemetry(void)
+{
+  SmartKnobTelemetryFrame frame;
+  uint8_t drop_count = 0U;
+
+  if (!FDCAN_SmartKnobTelemetryActive()) {
+    return 0U;
+  }
+
+  /* One logical state frame and one motion/current frame form a sample. */
+  for (uint8_t frame_index = 0U; frame_index < 2U; ++frame_index) {
+    if (!smart_knob_build_telemetry(HAL_GetTick(), &frame)) {
+      break;
+    }
+    const uint8_t command_id = SMART_KNOB_TELEMETRY_COMMAND_ID + frame.type - 1U;
+    const uint16_t tx_option = ((uint16_t)frame.sequence << 8) | can_id;
+    if (FDCAN1_Send_Msg(command_id, tx_option,
+                        frame.destination_id, frame.data) != 0U) {
+      ++drop_count;
+    }
+  }
+  return drop_count;
+}
+
 void FDCAN_ServiceReconfiguration(void)
 {
   bool reconfigure = false;
@@ -712,6 +742,9 @@ bool FDCAN_ProcessCommand(const CanProtocolCommand *command,
           break;                   
         
         default:
+          if (smart_knob_read_parameter(func_index, &int_value_temp)) {
+            feedback_function_read(data, func_index, int_value_temp);
+          }
           break;
         }
         FDCAN_SetResponse(response, cmd_id, option, can_id, data);
@@ -901,6 +934,7 @@ bool FDCAN_ProcessCommand(const CanProtocolCommand *command,
           break;        
         
         default:
+          (void)smart_knob_write_parameter(func_index, func_data, option);
           break;
         }
         my_tx_option = feedback_option_data(can_id, data);

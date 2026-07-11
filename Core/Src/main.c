@@ -214,7 +214,8 @@ void init_flash_data(void)
   }
   else if (motor_mode == MODE_POS_ERR_PROTECT) {
     motor_mode = MODE_POS;
-  }  
+  }
+  last_motor_mode = motor_mode;
 }
 
 void flash_data_write_back(void)

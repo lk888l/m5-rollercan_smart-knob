@@ -138,8 +138,10 @@ uint8_t usart_tx_flag = 0;
 uint8_t dis_show_flag = DIS_INFO;
 uint8_t last_dis_show_flag = DIS_INFO;
 
-uint8_t motor_mode = MODE_SPEED;
-uint8_t last_motor_mode = MODE_SPEED;
+/* SmartKnob is the product's default application mode.  The active haptic
+   preset itself is selected in smart_knob_modes.h. */
+uint8_t motor_mode = MODE_DIAL;
+uint8_t last_motor_mode = MODE_DIAL;
 
 uint8_t motor_id = 0;
 

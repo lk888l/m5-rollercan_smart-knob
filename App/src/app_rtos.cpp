@@ -167,7 +167,8 @@ void CommunicationTask(void *)
     for (;;) {
         if ((HAL_FDCAN_GetRxFifoFillLevel(&hfdcan1, FDCAN_RX_FIFO0) == 0U) &&
             (uxQueueMessagesWaiting(can_response_queue) == 0U)) {
-            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10U));
+            const uint32_t idle_wait_ms = FDCAN_SmartKnobTelemetryActive() ? 1U : 10U;
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(idle_wait_ms));
         } else {
             ulTaskNotifyTake(pdTRUE, 0U);
         }
@@ -224,6 +225,7 @@ void CommunicationTask(void *)
                 ++app_can_tx_drop_count;
             }
         }
+        app_can_tx_drop_count += FDCAN_ServiceSmartKnobTelemetry();
         FDCAN_ServiceReconfiguration();
     }
 }

@@ -21,6 +21,7 @@ ROLLERCAN 是一个基于 STM32G431 的无刷电机控制固件。工程由 STM3
 | [构建与烧录](docs/build-and-flash.md) | CMake/MDK 工程、工具链、构建命令、产物 |
 | [外设与引脚](docs/peripherals.md) | TIM/ADC/SPI/I2C/FDCAN/GPIO/DMA 的用途 |
 | [控制链路](docs/control-loop.md) | FOC、电流环、速度环、位置环、电流模式、Dial 模式 |
+| [固件 SmartKnob](docs/smartknob-firmware.md) | 模块化模式、默认预设、CAN 在线配置和主动遥测 |
 | [通信协议](docs/communication-protocol.md) | I2C 寄存器表、CAN 命令、CAN-I2C 桥接 |
 | [显示与输入](docs/display-and-input.md) | OLED 页面、菜单、按键、灯效 |
 | [持久化配置](docs/persistence.md) | Flash 数据布局、读写时机、保护状态保存 |

@@ -169,3 +169,9 @@ function read 响应使用：
 data[0..1] = function index
 data[4..7] = int32 value
 ```
+
+## 固件 SmartKnob 扩展
+
+`0x8001–0x8304` 为固件本地 SmartKnob 的模式、调参、主动遥测和状态读取 function。SmartKnob 打开主动遥测后，不需要上位机轮询角度或电流：固件会用 `cmd=0x17/0x18` 成对推送逻辑状态和运动/电流状态。
+
+完整的 function 表、缩放、帧字段、模式索引和推荐启动顺序见 [固件 SmartKnob](smartknob-firmware.md)。

@@ -84,6 +84,8 @@ bool FDCAN_ReadPendingCommand(CanProtocolCommand *command);
 bool FDCAN_IsBridgeCommand(const CanProtocolCommand *command);
 bool FDCAN_ProcessCommand(const CanProtocolCommand *command, CanProtocolResponse *response);
 uint8_t FDCAN_SendResponse(const CanProtocolResponse *response);
+bool FDCAN_SmartKnobTelemetryActive(void);
+uint8_t FDCAN_ServiceSmartKnobTelemetry(void);
 void FDCAN_ServiceReconfiguration(void);
 void FDCAN_ProcessPending(void);
 /* USER CODE END Prototypes */
