@@ -151,7 +151,8 @@ Dial 模式由 `MyFile/src/smart_knob.c` 和 `MyFile/src/smart_knob_modes.c` 共
 - `handle_smart_knob()` 以 1 kHz 使用本机 `mechanical_rad` 和 `motor_rps` 更新 detent/endstop 状态机。
 - 触感输出使用 `(P * position_error - D * velocity) * current_scale`，再叠加摩擦补偿和可选双相 click 电流。
 - 电流同时受模式限幅、0–1000 ‰ 安全比例和底层 1.2 A 硬限制约束，最后调用 `MotorDriverSetCurrentReal()`。
-- 低速时慢慢修正 detent 中心；编码器跳变、进入模式后的稳定期以及高速转动时输出 0。
+- 低速时慢慢修正 detent 中心；编码器跳变或进入模式后的稳定期输出 0。跳变保护连续取得两个合理样本后会重新同步，不会停留在永久无效状态。
+- 单中心回弹模式从 20 rad/s 开始削弱加速电流、45 rad/s 时完全取消加速电流；全局高速保护在 60 rad/s 进入、40 rad/s 退出。
 - `smart_knob_modes.h` 的 `SMART_KNOB_DEFAULT_MODE` 是唯一的默认预设选择点；各预设配置互相独立。
 - CAN 参数切换模式或修改手感仍在 ControlTask 执行；CommunicationTask 只读取一致快照并主动发送遥测。
 
@@ -162,9 +163,11 @@ Dial 模式由 `MyFile/src/smart_knob.c` 和 `MyFile/src/smart_knob_modes.c` 共
 | 保护 | 条件 | 行为 |
 | --- | --- | --- |
 | 过压 | `vol_lpf > 1800` | 设置 `ERR_OVER_VOLTAGE`，关闭驱动，显示 OVP |
-| 过压恢复 | `vol_lpf <= 1750` | 清过压错误，回到待机 |
+| 过压恢复 | `vol_lpf <= 1750` | 清过压错误，回到待机；`0x7040=1` 时稳定 300 ms 后清零目标、重同步 Dial 并恢复驱动 |
 | 位置越界 | `abs(mechanical_angle * 100) > MY_INT32_MAX` 且保护开启 | 设置 `ERR_OVER_VALUE`，关闭驱动，显示 RANGE |
 | 速度堵转 | 速度误差超过阈值且电流超过 500mA 持续超时 | 进入 `MODE_SPEED_ERR_PROTECT` |
 | 位置堵转 | 位置误差超过阈值且电流超过 500mA 持续超时 | 进入 `MODE_POS_ERR_PROTECT` |
+
+过压自动释放默认关闭，`0x7040` 可在运行期读取或设置为 0/1。自动恢复只在电机输出请求仍有效、无其他错误且运行模式合法时执行；否则保持待机，等待显式重新使能。
 
 堵转保护态会尝试自动恢复，恢复尝试次数由 `err_recover_try_max` 限制。当前菜单和协议能开关堵转保护，但最大尝试次数等部分 CAN function index 只定义了枚举，未完整接入写分支。

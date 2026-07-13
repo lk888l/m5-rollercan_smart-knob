@@ -174,6 +174,9 @@ uint32_t lastest_rgb_color = 0;
 #define LEGACY_CONTROL_RATE_HZ 5600.0f
 #define LEGACY_MODE_RATE_HZ (56000.0f / 11.0f)
 #define CONTROL_TASK_RATE_HZ 1000.0f
+#define OVER_VOLTAGE_TRIP_CENTIVOLTS 1800.0f
+#define OVER_VOLTAGE_RELEASE_CENTIVOLTS 1750.0f
+#define OVER_VOLTAGE_RESTART_DELAY_MS 300U
 
 static volatile uint8_t control_task_active = 0;
 static float control_filter_alpha =
@@ -185,6 +188,43 @@ static float encoder_counts_to_rps = 2.0f * PI * LEGACY_CONTROL_RATE_HZ;
 static FastSensorSnapshot control_sensor_snapshot;
 
 void Rpm_Count_100us(void);
+
+static void schedule_over_voltage_recovery(uint32_t now_ms)
+{
+  if (over_vol_protect_mode && motor_output && error_code == ERR_NONE &&
+      !err_stalled_flag && !over_value_flag && motor_mode < MODE_MAX) {
+    over_vol_protect_auto_counter = now_ms;
+    over_vol_protect_auto_flag = 1U;
+  }
+  else {
+    over_vol_protect_auto_flag = 0U;
+  }
+}
+
+static void service_over_voltage_recovery(uint32_t now_ms)
+{
+  if (!over_vol_protect_auto_flag) {
+    return;
+  }
+  if (!over_vol_protect_mode || !motor_output || over_vol_flag ||
+      error_code != ERR_NONE || err_stalled_flag || over_value_flag ||
+      motor_mode >= MODE_MAX) {
+    over_vol_protect_auto_flag = 0U;
+    return;
+  }
+  if ((now_ms - over_vol_protect_auto_counter) < OVER_VOLTAGE_RESTART_DELAY_MS) {
+    return;
+  }
+
+  /* Publish zero before RUN so the ISR cannot reuse a pre-fault current target.
+     Dial mode also gets a fresh position baseline and its normal settle delay. */
+  MotorDriverSetCurrentReal(0.0f);
+  if (motor_mode == MODE_DIAL) {
+    init_smart_knob();
+  }
+  MotorDriverSetMode(MDRV_MODE_RUN);
+  over_vol_protect_auto_flag = 0U;
+}
 
 /*
  * A new electrical offset changes the encoder's coordinate system.  Treat it
@@ -795,31 +835,30 @@ void Loop_Control(void)
     temp_lpf += control_filter_alpha * ((float)control_sensor_snapshot.internal_temp_raw - temp_lpf);
     internal_temp = (int32_t)temp_lpf;
 
+    const uint32_t protection_now_ms = HAL_GetTick();
     if (!over_vol_flag) {
-      if (vol_lpf > 1800) {
+      if (vol_lpf > OVER_VOLTAGE_TRIP_CENTIVOLTS) {
         over_vol_flag = 1;
         error_code |= ERR_OVER_VOLTAGE;
+        over_vol_protect_auto_flag = 0U;
+        MotorDriverSetCurrentReal(0.0f);
         MotorDriverSetMode(MDRV_MODE_OFF);
-        if (!over_vol_protect_auto_flag && over_vol_protect_mode) {
-          over_vol_protect_auto_counter = HAL_GetTick();
-          over_vol_protect_auto_flag = 1;
-        }
+      }
+      else {
+        service_over_voltage_recovery(protection_now_ms);
       }
     }
     else {
-      if (vol_lpf <= 1750) {
+      if (vol_lpf <= OVER_VOLTAGE_RELEASE_CENTIVOLTS) {
         over_vol_flag = 0;
         error_code &= ~ERR_OVER_VOLTAGE;
         sys_status = SYS_STANDBY;
-        if (!over_vol_protect_auto_flag && over_vol_protect_mode) {
-          over_vol_protect_auto_counter = HAL_GetTick();
-          over_vol_protect_auto_flag = 1;
-        }
+        schedule_over_voltage_recovery(protection_now_ms);
       }
       else {
         over_vol_flag = 1;
         error_code |= ERR_OVER_VOLTAGE;
-        MotorDriverSetMode(MDRV_MODE_OFF);        
+        over_vol_protect_auto_flag = 0U;
       }      
     }
     if (motor_overvalue_protection_flag) {

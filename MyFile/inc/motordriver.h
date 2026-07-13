@@ -33,6 +33,8 @@ void MotorDriverSetAngleOffset(float32_t offset);
 
 void MotorDriverSetMode(uint8_t val);
 
+uint8_t MotorDriverIsOutputEnabled(void);
+
 uint8_t IsMotorDriverEncCalBusy(void);
 
 uint16_t GetMotorDriverEncCalOffset(void);

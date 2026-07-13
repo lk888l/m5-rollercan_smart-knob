@@ -136,11 +136,12 @@ identifier = (cmd_id << 24) | (option << 8) | can_id
 | `FUNC_DIAL_COUNTER` | `0x7033` | Dial 计数 |
 | `FUNC_VIN` | `0x7034` | 输入电压 |
 | `FUNC_TEMP` | `0x7035` | 温度 |
+| `FUNC_OVERVOLTAGE_PROTECTION_RELEASE_MODE` | `0x7040` | 过压释放模式：0 手动，1 电压稳定后自动软恢复 |
 | `FUNC_RGB_MODE` | `0x7050` | RGB 模式 |
 | `FUNC_RGB_COLOR` | `0x7051` | RGB 颜色 |
 | `FUNC_RGB_BRIGHTNESS` | `0x7052` | RGB 亮度 |
 
-部分枚举如过压保护释放模式、最大堵转尝试次数、堵转阈值和超时已定义，但当前 CAN 读写分支没有完整实现。
+`0x7040` 已接入 function read/write；最大堵转尝试次数、堵转阈值和超时等其他枚举仍未完整接入 CAN 读写分支。
 
 ## CAN 状态反馈
 

@@ -740,6 +740,9 @@ bool FDCAN_ProcessCommand(const CanProtocolCommand *command,
         case FUNC_RGB_BRIGHTNESS:
             feedback_function_read(data, func_index, brightness_index);
           break;                   
+        case FUNC_OVERVOLTAGE_PROTECTION_RELEASE_MODE:
+            feedback_function_read(data, func_index, over_vol_protect_mode);
+          break;
         
         default:
           if (smart_knob_read_parameter(func_index, &int_value_temp)) {
@@ -797,6 +800,12 @@ bool FDCAN_ProcessCommand(const CanProtocolCommand *command,
             MotorDriverSetMode(MDRV_MODE_OFF);
           }
 
+          break;
+        case FUNC_OVERVOLTAGE_PROTECTION_RELEASE_MODE:
+          over_vol_protect_mode = abs(func_data) != 0;
+          if (!over_vol_protect_mode) {
+            over_vol_protect_auto_flag = 0U;
+          }
           break;
         case FUNC_RUN_MODE:
           if (func_data && func_data < MODE_MAX && !err_stalled_flag) {

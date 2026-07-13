@@ -26,7 +26,11 @@
 #define SMART_KNOB_SETTLE_TIME_MS 300U
 #define SMART_KNOB_MAX_SAMPLE_SPEED_RAD_S 80.0f
 #define SMART_KNOB_MIN_SAMPLE_STEP_RAD DEG_TO_RAD(3.0f)
+#define SMART_KNOB_SAMPLE_RECOVERY_COUNT 2U
+#define SMART_KNOB_SPEED_DERATE_START_RAD_S 20.0f
+#define SMART_KNOB_SPEED_DERATE_STOP_RAD_S 45.0f
 #define SMART_KNOB_MAX_HAPTIC_SPEED_RAD_S 60.0f
+#define SMART_KNOB_HAPTIC_RESUME_SPEED_RAD_S 40.0f
 #define SMART_KNOB_PID_LIMIT 10.0f
 #define SMART_KNOB_HARD_CURRENT_LIMIT_A 1.2f
 #define SMART_KNOB_CURRENT_DEADBAND_A 0.06f
@@ -50,6 +54,9 @@ static float last_raw_position_rad;
 static uint32_t last_sample_us;
 static uint32_t enable_after_ms;
 static bool sample_valid;
+static bool sample_recovery_pending;
+static uint8_t sample_recovery_count;
+static bool high_speed_active;
 static float idle_velocity_ewma;
 static uint32_t idle_start_ms;
 static float position_filter_alpha = SMART_KNOB_POSITION_FILTER_ALPHA_BASE;
@@ -201,15 +208,63 @@ static float stable_position(void)
     const float max_delta_rad = fmaxf(SMART_KNOB_MIN_SAMPLE_STEP_RAD,
                                       SMART_KNOB_MAX_SAMPLE_SPEED_RAD_S * sample_time_s);
     last_sample_us = now_us;
+    /* Always advance the raw baseline. Otherwise one rejected high-speed or
+       encoder-glitch sample makes every later sample compare against a stale
+       position and permanently disables haptics. */
+    last_raw_position_rad = raw_position_rad;
     if (fabsf(raw_delta_rad) <= max_delta_rad) {
-        last_raw_position_rad = raw_position_rad;
-        filtered_position_rad += position_filter_alpha *
-                                 (raw_position_rad - filtered_position_rad);
-        sample_valid = true;
+        if (sample_recovery_pending) {
+            if (++sample_recovery_count >= SMART_KNOB_SAMPLE_RECOVERY_COUNT) {
+                /* Drop filter history accumulated before the discontinuity,
+                   but preserve the detent/return center itself. */
+                filtered_position_rad = raw_position_rad;
+                sample_recovery_pending = false;
+                sample_recovery_count = 0U;
+                sample_valid = true;
+            } else {
+                sample_valid = false;
+            }
+        } else {
+            filtered_position_rad += position_filter_alpha *
+                                     (raw_position_rad - filtered_position_rad);
+            sample_valid = true;
+        }
     } else {
+        sample_recovery_pending = true;
+        sample_recovery_count = 0U;
         sample_valid = false;
     }
     return filtered_position_rad;
+}
+
+static void update_high_speed_state(float velocity_rad_s)
+{
+    const float speed_rad_s = fabsf(velocity_rad_s);
+    if (high_speed_active) {
+        if (speed_rad_s <= SMART_KNOB_HAPTIC_RESUME_SPEED_RAD_S) {
+            high_speed_active = false;
+        }
+    } else if (speed_rad_s >= SMART_KNOB_MAX_HAPTIC_SPEED_RAD_S) {
+        high_speed_active = true;
+    }
+}
+
+static float derate_accelerating_current(float requested_current_a,
+                                         float velocity_rad_s)
+{
+    const float speed_rad_s = fabsf(velocity_rad_s);
+    if (requested_current_a * velocity_rad_s <= 0.0f ||
+        speed_rad_s <= SMART_KNOB_SPEED_DERATE_START_RAD_S) {
+        return requested_current_a;
+    }
+
+    const float scale = clampf(
+        (SMART_KNOB_SPEED_DERATE_STOP_RAD_S - speed_rad_s) /
+            (SMART_KNOB_SPEED_DERATE_STOP_RAD_S -
+             SMART_KNOB_SPEED_DERATE_START_RAD_S),
+        0.0f,
+        1.0f);
+    return requested_current_a * scale;
 }
 
 static bool has_detent_at(const PB_SmartKnobConfig *config, int32_t position)
@@ -265,7 +320,7 @@ static void publish_runtime_state(float velocity_rad_s)
     if (motor_mode == MODE_DIAL) {
         flags |= (1U << 0);
     }
-    if (motor_output != 0U) {
+    if (MotorDriverIsOutputEnabled()) {
         flags |= (1U << 1);
     }
     if (out_of_bounds) {
@@ -277,11 +332,14 @@ static void publish_runtime_state(float velocity_rad_s)
     if (telemetry_enable != 0U) {
         flags |= (1U << 4);
     }
-    if (fabsf(velocity_rad_s) > SMART_KNOB_MAX_HAPTIC_SPEED_RAD_S) {
+    if (high_speed_active) {
         flags |= (1U << 5);
     }
     if (error_code != 0U) {
         flags |= (1U << 6);
+    }
+    if (over_vol_flag != 0U) {
+        flags |= (1U << 7);
     }
 
     ++runtime_state_version;
@@ -310,6 +368,10 @@ void init_smart_knob(void)
     last_sample_us = micros();
     enable_after_ms = HAL_GetTick() + SMART_KNOB_SETTLE_TIME_MS;
     sample_valid = true;
+    sample_recovery_pending = false;
+    sample_recovery_count = 0U;
+    high_speed_active =
+        fabsf(motor_rps) > SMART_KNOB_HAPTIC_RESUME_SPEED_RAD_S;
     last_command_current_ma = 0.0f;
 
     reanchor_active_mode(!controller_initialized);
@@ -343,6 +405,7 @@ void handle_smart_knob(void)
     const uint32_t now_ms = HAL_GetTick();
     const float knob_position_rad = stable_position();
     const float velocity_rad_s = motor_rps;
+    update_high_speed_state(velocity_rad_s);
     if (!sample_valid || (int32_t)(now_ms - enable_after_ms) < 0) {
         last_command_current_ma = 0.0f;
         MotorDriverSetCurrentReal(0.0f);
@@ -428,12 +491,16 @@ void handle_smart_knob(void)
                                  tuning->max_current_permille / 1000.0f;
     const float current_limit_a = fminf(tuning->current_limit_a,
                                         safety_limit_a);
-    if (fabsf(velocity_rad_s) > SMART_KNOB_MAX_HAPTIC_SPEED_RAD_S) {
+    if (high_speed_active) {
         requested_current_a = 0.0f;
     } else {
         requested_current_a = clampf(requested_current_a,
                                      -current_limit_a,
                                      current_limit_a);
+        if (num_positions == 1) {
+            requested_current_a = derate_accelerating_current(requested_current_a,
+                                                              velocity_rad_s);
+        }
     }
     if (fabsf(requested_current_a) < SMART_KNOB_CURRENT_DEADBAND_A) {
         requested_current_a = 0.0f;

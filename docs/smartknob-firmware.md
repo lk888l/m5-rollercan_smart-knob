@@ -59,10 +59,11 @@ current = current_scale * pid + friction_current + click_current
 - 到达 min/max 后，P 改用 `endstop_strength_unit * 4`。
 - 磁吸模式在非指定位置不施加 detent 弹簧。
 - click 使用 2 ms 正向 + 2 ms 反向的双相电流脉冲。
-- 速度绝对值超过 60 rad/s 时电流目标归零，避免高速正反馈。
+- 单中心回弹模式在 20–45 rad/s 区间逐步削弱与旋转同向的加速电流，保留反向阻尼电流，避免长行程回正持续加速。
+- 速度达到 60 rad/s 后进入高速保护并把电流目标归零；只有速度降到 40 rad/s 后才退出，避免阈值附近反复启停。
 - 电流同时受模式 `current_limit_a`、`max_current_permille` 和硬件 1.2 A 上限约束。
 - 绝对值小于 0.06 A 的目标进入输出死区。
-- 编码器单步不连续或进入 Dial 后 300 ms 稳定期内，电流目标归零。
+- 编码器单步不连续或进入 Dial 后 300 ms 稳定期内，电流目标归零。无效样本仍会推进原始位置基线，连续两个合理样本后重新同步滤波位置，因此单次跳变或真实高速转动不会永久锁死触感输出。
 
 ## CAN 参数
 
@@ -132,7 +133,7 @@ bits 7..0    destination host ID
 | 字节 | 内容 |
 | --- | --- |
 | 0 | 活动预设索引 |
-| 1 | flags：bit0 Dial、bit1 motor output、bit2 endstop、bit3 encoder valid、bit4 telemetry、bit5 high speed、bit6 fault |
+| 1 | flags：bit0 Dial、bit1 actual motor output、bit2 endstop、bit3 encoder valid、bit4 telemetry、bit5 high-speed latch、bit6 any fault、bit7 overvoltage |
 | 2..5 | `current_position`, int32 |
 | 6..7 | `sub_position_unit * 10000`, int16 |
 
@@ -145,6 +146,8 @@ bits 7..0    destination host ID
 | 6..7 | 实测电流，mA，int16 |
 
 上位机应按 sequence 配对两帧，但不应等待请求-响应；丢失某一帧时直接使用下一组最新状态。
+
+bit1 来自 FOC 电流环的实际使能状态，而不是上位机最后写入的开关请求；因此过压保护关闭驱动后，bit1 会清零。bit7 可直接区分过压与其他 fault，输入电压仍可通过原协议 `0x7034` 读取。
 
 ## 推荐上位机启动顺序
 

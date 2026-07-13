@@ -26,7 +26,7 @@
 #define     SQRT3_MULT_TS   (float32_t)((float32_t)TS * SQRT3)
 #define     LIMIT           (float32_t)(0.9f / SQRT3)
 
-uint8_t currentloop_enable;
+volatile uint8_t currentloop_enable;
 uint8_t motor_driver_cal_flag;
 uint8_t motor_driver_cal_init;
 volatile uint8_t motor_driver_cal_busy;
@@ -572,6 +572,11 @@ void MotorDriverSetMode(uint8_t val)
     }
 
     FastControlPublishDriverMode(val);
+}
+
+uint8_t MotorDriverIsOutputEnabled(void)
+{
+    return currentloop_enable != 0U;
 }
 
 //Set motor phase current by ADC value
