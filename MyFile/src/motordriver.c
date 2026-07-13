@@ -25,6 +25,7 @@
 #define     TS              1000
 #define     SQRT3_MULT_TS   (float32_t)((float32_t)TS * SQRT3)
 #define     LIMIT           (float32_t)(0.9f / SQRT3)
+#define     MOTOR_CURRENT_OUTPUT_DEADBAND_MA 60.0f
 
 volatile uint8_t currentloop_enable;
 uint8_t motor_driver_cal_flag;
@@ -88,6 +89,7 @@ uint16_t eangle_get;
 
 void MotorDriverSetMode(uint8_t val);
 static void MotorDriverApplyModeFromISR(uint8_t val);
+static void CurrentLoopResetOutput(void);
 
 static uint32_t applied_mode_generation = UINT32_MAX;
 
@@ -428,10 +430,17 @@ void MotorDriverProcess(void)
 
     Clarke_Park(ia,ib,ic);
 
-	if(currentloop_enable)
+    if(currentloop_enable)
     {
-        CurrentLoopCalc(6.4f);
-    }			
+        if (motor_driver_cal_busy == 0U && iq_curr_pi_target == 0.0f) {
+            /* A deadband command must be electrically quiet, not merely a
+             * zero current target that leaves both PI loops correcting ADC
+             * offset/noise around zero. */
+            CurrentLoopResetOutput();
+        } else {
+            CurrentLoopCalc(6.4f);
+        }
+    }
     
        
 	vbusLimitCalc(vbus);
@@ -469,16 +478,7 @@ static void MotorDriverApplyModeFromISR(uint8_t val)
             GPIOB->BRR=1<<2; //DISABLE Driver Output
 
             currentloop_enable =0;//Disable current loop
-
-            iq_curr_pi_value    =0;
-            iq_curr_pi_error    =0;
-            iq_curr_pi_errSum   =0;
-            iq_curr_pi_result   =0;
-
-            id_curr_pi_value    =0;
-            id_curr_pi_error    =0;
-            id_curr_pi_errSum   =0;
-            id_curr_pi_result   =0;
+            CurrentLoopResetOutput();
 
             break;
         }
@@ -504,6 +504,22 @@ static void MotorDriverApplyModeFromISR(uint8_t val)
 
     }
 
+}
+
+static void CurrentLoopResetOutput(void)
+{
+    iq_curr_pi_value  = 0.0f;
+    iq_curr_pi_error  = 0.0f;
+    iq_curr_pi_errSum = 0.0f;
+    iq_curr_pi_result = 0.0f;
+
+    id_curr_pi_value  = 0.0f;
+    id_curr_pi_error  = 0.0f;
+    id_curr_pi_errSum = 0.0f;
+    id_curr_pi_result = 0.0f;
+
+    ud = 0.0f;
+    uq = 0.0f;
 }
 
 void MotorDriverSetMode(uint8_t val)
@@ -606,6 +622,12 @@ void MotorDriverSetCurrentReal(float32_t phase_current)
     float32_t iq_calc = 0.0f;
     if(motor_driver_cal_busy ==0 )
     {
+        /* Suppress low-current commands that cannot produce stable torque and
+         * otherwise make the motor vibrate around zero output. */
+        if(phase_current >= -MOTOR_CURRENT_OUTPUT_DEADBAND_MA &&
+           phase_current <= MOTOR_CURRENT_OUTPUT_DEADBAND_MA) {
+            phase_current = 0.0f;
+        }
         if(phase_current> 1200.0f)//1.2A
         phase_current= 1200.0f;
         if(phase_current< -1200.0f)//-1.2A

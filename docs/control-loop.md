@@ -44,6 +44,8 @@ FOC 实现在 `MyFile/src/motordriver.c`。
 - `id_curr_pi_target` 默认 0。
 - `iq_curr_pi_target` 由 `MotorDriverSetCurrentAdc()` 或 `MotorDriverSetCurrentReal()` 设置。
 - `MotorDriverSetCurrentReal(phase_current)` 的单位是 mA，内部乘以 1.25 得到 ADC/PI 目标。
+- `MotorDriverSetCurrentReal()` 会把绝对值不超过 60 mA 的目标归零，抑制零点附近的低电流震动。
+- 死区生效时，FOC ISR 同时清零 Id/Iq PI 状态和 `ud/uq`，避免电流环继续追踪零点采样偏置；遥测中的实测电流仍可能显示 ADC 的小幅零点噪声。
 - 实际限幅为 `[-1200, 1200]` mA。
 
 ## 编码器校准

@@ -502,7 +502,7 @@ void handle_smart_knob(void)
                                                               velocity_rad_s);
         }
     }
-    if (fabsf(requested_current_a) < SMART_KNOB_CURRENT_DEADBAND_A) {
+    if (fabsf(requested_current_a) <= SMART_KNOB_CURRENT_DEADBAND_A) {
         requested_current_a = 0.0f;
     }
 
