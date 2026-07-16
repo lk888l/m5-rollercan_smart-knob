@@ -177,6 +177,7 @@ uint32_t lastest_rgb_color = 0;
 #define OVER_VOLTAGE_TRIP_CENTIVOLTS 1800.0f
 #define OVER_VOLTAGE_RELEASE_CENTIVOLTS 1750.0f
 #define OVER_VOLTAGE_RESTART_DELAY_MS 300U
+#define FAST_LOOP_MIN_START_MARGIN_TIM1_TICKS 640U
 
 static volatile uint8_t control_task_active = 0;
 static float control_filter_alpha =
@@ -186,6 +187,11 @@ static float speed_filter_alpha =
 static float encoder_counts_to_rpm = 60.0f * LEGACY_CONTROL_RATE_HZ;
 static float encoder_counts_to_rps = 2.0f * PI * LEGACY_CONTROL_RATE_HZ;
 static FastSensorSnapshot control_sensor_snapshot;
+static volatile uint8_t fast_cycle_pending = 0U;
+static uint32_t fast_cycle_start_cycles = 0U;
+static uint32_t fast_cycle_start_active_cycles = 0U;
+volatile uint32_t fast_loop_late_start_count;
+volatile uint32_t fast_loop_sync_timeout_count;
 
 void Rpm_Count_100us(void);
 
@@ -584,11 +590,12 @@ void InitMysys(void)
 	MyADCInit();
 	TIM1->CCR4=995;//Enable TIM1 CH4 for ADC trigger
 
-	/* Initialise every dependency used by the FOC ISR before TIM1 can enter it.
-	 * In particular, EncoderInit() enables SPI1; entering Loop_FOC() earlier
-	 * leaves SPI RXNE permanently low after the first DR write. */
+	/* Initialise every dependency used by the fast loop before TIM1 can enter it.
+	 * EncoderInit() prepares SPI1 plus both DMA2 channels; starting TIM1 earlier
+	 * would leave the first FOC cycle without a DMA completion event. */
 	MotorDriverInit();
 	EncoderInit();
+	(void)EncoderPrimeDmaRead();
 
 	//Enable TIM1 channels for PWM generate
 	HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_1);
@@ -598,8 +605,24 @@ void InitMysys(void)
 	HAL_Delay(20);
 	MyADCZeroCal();
 
-  //TIM1 update interrupt for FOC and outside control loop
+  /* TIM1 is already running steadily for PWM/ADC. Keep it running and align
+     UIE to a natural repetition update. Stopping a center-aligned timer and
+     forcing CNT=0 can preserve an internal down-count direction and create a
+     first IRQ only a few hundred cycles before the next underflow. */
+  __HAL_TIM_DISABLE_IT(&htim1, TIM_IT_UPDATE);
   __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_UPDATE);
+  HAL_NVIC_ClearPendingIRQ(TIM1_UP_TIM16_IRQn);
+  uint32_t tim1_sync_timeout = 100000U;
+  while ((__HAL_TIM_GET_FLAG(&htim1, TIM_FLAG_UPDATE) == RESET) &&
+         (--tim1_sync_timeout != 0U)) {
+  }
+  if (tim1_sync_timeout == 0U) {
+    fast_loop_sync_timeout_count++;
+  }
+  __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_UPDATE);
+  (void)htim1.Instance->SR;
+  __DSB();
+  HAL_NVIC_ClearPendingIRQ(TIM1_UP_TIM16_IRQn);
   __HAL_TIM_ENABLE_IT(&htim1, TIM_IT_UPDATE);
   HAL_Delay(300); 
   init_flash_data();
@@ -613,7 +636,7 @@ void InitMysys(void)
      */
     MotorDriverSetMode(MDRV_MODE_ENC_CAL);
     while (IsMotorDriverEncCalBusy()) {
-      /* Calibration is advanced by the TIM1 FOC interrupt. */
+      /* Calibration advances in the TIM1-triggered DMA2 RX fast-loop ISR. */
     }
     angle_cal_offset = GetMotorDriverEncCalOffset();
     MotorDriverSetAngleOffset(angle_cal_offset);
@@ -772,7 +795,6 @@ void MysysStorageOnce(void)
 
 void Loop_FOC(void)
 {
-  uint32_t runtime_start_cycles = RuntimeMetricsCycleNow();
   GPIOB->BSRR=GPIO_PIN_9;
   MotorDriverProcess();
   MyAdcProcess();
@@ -782,7 +804,6 @@ void Loop_FOC(void)
                            MotorDriverGetPhaseCurrentReal(),
                            internal_temp_raw);
   GPIOB->BRR=GPIO_PIN_9;
-  RuntimeMetricsRecordFoc(runtime_start_cycles);
 
 }
 
@@ -1047,13 +1068,9 @@ void MysysControlStep(void)
   MysysRunModeController();
 }
 
-
-void MysysFastLoopISR(void)
+static void MysysRunLegacyOuterSchedulerFromISR(void)
 {
-  __HAL_TIM_CLEAR_IT(&htim1, TIM_IT_UPDATE);
-  Loop_FOC();
-
-  /* During early hardware initialisation there is no ControlTask yet.  Keep
+  /* During early hardware initialisation there is no ControlTask yet. Keep
      the legacy outer scheduler alive only until the task takes ownership. */
   if (!control_task_active) {
     counter_loop_control += 3U;
@@ -1070,3 +1087,79 @@ void MysysFastLoopISR(void)
   }
 }
 
+static void MysysFinishPendingFastLoopFromISR(uint8_t fresh_sample,
+                                               uint32_t active_start_cycles,
+                                               uint8_t record_dma_isr)
+{
+  if (fast_cycle_pending == 0U) {
+    EncoderRecordUnexpectedFastCompletionFromISR();
+    if (record_dma_isr != 0U) {
+      RuntimeMetricsRecordEncoderDmaIsr(active_start_cycles);
+    }
+    return;
+  }
+
+  fast_cycle_pending = 0U;
+  if (fresh_sample != 0U) {
+    RuntimeMetricsRecordEncoderDma(fast_cycle_start_cycles);
+  } else {
+    EncoderRecordStaleSampleFromISR();
+  }
+
+  Loop_FOC();
+  RuntimeMetricsRecordFocCpu(
+      fast_cycle_start_active_cycles +
+      RuntimeMetricsElapsedSince(active_start_cycles));
+  RuntimeMetricsRecordFoc(fast_cycle_start_cycles);
+  MysysRunLegacyOuterSchedulerFromISR();
+  if (record_dma_isr != 0U) {
+    RuntimeMetricsRecordEncoderDmaIsr(active_start_cycles);
+  }
+}
+
+
+void MysysFastLoopISR(void)
+{
+  const uint32_t active_start_cycles = RuntimeMetricsCycleNow();
+  const uint32_t timer_count = htim1.Instance->CNT;
+  const uint32_t timer_period = htim1.Instance->ARR;
+  const uint32_t ticks_to_next_boundary =
+      ((htim1.Instance->CR1 & TIM_CR1_DIR) != 0U)
+          ? timer_count
+          : (timer_period - timer_count);
+  const uint32_t next_update_already_pending =
+      NVIC_GetPendingIRQ(TIM1_UP_TIM16_IRQn);
+
+  /* A priority-0 startup compatibility step can delay a pending TIM1 update
+     until the next center-aligned boundary is already close. Starting a
+     32-bit SPI frame there would overlap that boundary. Drop only this late
+     event; a normal update enters while moving away from a boundary and has
+     roughly the full ARR count available. */
+  if ((next_update_already_pending != 0U) ||
+      (ticks_to_next_boundary < FAST_LOOP_MIN_START_MARGIN_TIM1_TICKS)) {
+    fast_loop_late_start_count++;
+    RuntimeMetricsRecordTim1Isr(active_start_cycles);
+    return;
+  }
+
+  fast_cycle_start_cycles = active_start_cycles;
+  fast_cycle_pending = 1U;
+  MotorDriverPrepareCycleFromISR();
+
+  if (EncoderStartDmaReadFromISR()) {
+    fast_cycle_start_active_cycles =
+        RuntimeMetricsElapsedSince(active_start_cycles);
+  } else {
+    /* DMA startup or overlap recovery uses the last valid encoder sample and
+       still advances the current loop exactly once for this TIM1 period. */
+    fast_cycle_start_active_cycles = 0U;
+    MysysFinishPendingFastLoopFromISR(0U, active_start_cycles, 0U);
+  }
+  RuntimeMetricsRecordTim1Isr(active_start_cycles);
+}
+
+void MysysFastLoopOnEncoderSampleFromISR(uint8_t fresh_sample,
+                                         uint32_t irq_start_cycles)
+{
+  MysysFinishPendingFastLoopFromISR(fresh_sample, irq_start_cycles, 1U);
+}

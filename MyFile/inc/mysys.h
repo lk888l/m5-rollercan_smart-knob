@@ -103,6 +103,10 @@ void MysysControlTaskBegin(void);
 void MysysControlStep(void);
 void MysysCycleMode(void);
 void MysysFastLoopISR(void);
+void MysysFastLoopOnEncoderSampleFromISR(uint8_t fresh_sample,
+                                         uint32_t irq_start_cycles);
+extern volatile uint32_t fast_loop_late_start_count;
+extern volatile uint32_t fast_loop_sync_timeout_count;
 uint8_t crc8_MAXIM(uint8_t *data, uint8_t len);
 
 #ifdef __cplusplus

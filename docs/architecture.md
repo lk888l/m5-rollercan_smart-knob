@@ -22,11 +22,12 @@ ROLLERCAN 固件可以按四层理解：
 | CommunicationTask | `App/src/app_rtos.cpp` | FDCAN FIFO、帧解码、回复发送和 CAN-I2C 桥接 |
 | MaintenanceTask | `App/src/app_rtos.cpp` -> `LoopMysysOnce()` | I2C 超时恢复、按钮扫描、OLED 刷新、WS2812 灯效 |
 | StorageTask | `App/src/app_rtos.cpp` -> `MysysStorageOnce()` | 安全状态下的 Flash 写回 |
-| TIM1 更新中断 | `TIM1_UP_TIM16_IRQHandler()` -> `MysysFastLoopISR()` | 约 18.67 kHz FOC 和 ADC 数据处理 |
+| TIM1 更新中断 | `TIM1_UP_TIM16_IRQHandler()` -> `MysysFastLoopISR()` | 约 18.67 kHz 启动 TLE5012B SPI1 DMA |
+| DMA2 Channel 1 中断 | `DMA2_Channel1_IRQHandler()` -> `MysysFastLoopOnEncoderSampleFromISR()` | 提交同周期角度并接续 FOC、ADC 与 PWM 更新 |
 | I2C1 事件中断 | `I2C1_EV_IRQHandler()` -> `i2c1_event_irq_handler()` | I2C 从机收发、事务完成回调到 `Slave_Complete_Callback()` |
 | I2C1 错误中断 | `I2C1_ER_IRQHandler()` -> `i2c1_error_irq_handler()` | 复位并重新初始化 I2C 从机 |
 | FDCAN 接收中断 | `FDCAN1_IT0_IRQHandler()` -> HAL callback | 只通知 CommunicationTask 并记录 FIFO loss |
-| DMA 中断 | TIM3 CH2 DMA 等 | WS2812 PWM-DMA 发送完成；ADC DMA HT/TC IRQ 已关闭 |
+| 其他 DMA 中断 | TIM3 CH2 DMA 等 | WS2812 PWM-DMA 发送完成；ADC DMA HT/TC IRQ 已关闭 |
 
 ## 核心数据流
 
@@ -38,7 +39,8 @@ ADC1 DMA -> adc1_convbuf
   -> FastSensorSnapshot
   -> Loop_Control
 
-TLE5012B SPI -> EncoderGetAngle
+TIM1 update ISR -> TLE5012B SPI1 DMA2 RX/TX
+  -> DMA2 RX complete ISR -> EncoderGetLatestAngle
   -> MotorDriverProcess
   -> angle_corrected / eangle_get
   -> FOC Park/Clarke/SVM
@@ -80,7 +82,7 @@ CAN 命令 -> FDCAN ISR notification -> CommunicationTask
 
 `Core/Src/*.c` 大部分是 CubeMX 生成文件，但本工程在几个文件的 USER CODE 区加入了业务逻辑：
 
-- `main.c`：启动前 SRAM 向量表重映射、Flash 参数初始化/写回、I2C 从机协议分发。
+- `main.c`：启动前将 `SCB->VTOR` 指向 `0x08002000` 的完整应用向量表、Flash 参数初始化/写回、I2C 从机协议分发。
 - `stm32g4xx_it.c`：中断入口中调用手写 helper。
 - `fdcan.c`：CAN 协议解析和桥接逻辑在 USER CODE 区。
 - `i2c.c`：除 CubeMX 初始化外，还提供 I2C 主机读写 helper。

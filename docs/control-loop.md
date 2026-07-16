@@ -11,8 +11,11 @@
        -> 发布 FastControlCommandSnapshot
 
 TIM1 update ISR（约 18.67 kHz）
-  -> Loop_FOC
-       -> 消费最新驱动模式和电流目标
+  -> 消费最新驱动模式和电流目标
+  -> 启动 TLE5012B 两字 DMA 读取
+  -> DMA2 RX 完成 ISR
+       -> 提交本周期编码器角度
+       -> Loop_FOC
        -> MotorDriverProcess
             -> 编码器角度
             -> Clarke/Park
@@ -30,7 +33,7 @@ FOC 实现在 `MyFile/src/motordriver.c`。
 
 关键步骤：
 
-1. `EncoderGetAngle()` 读取 TLE5012B 原始角度。
+1. 使用 DMA2 RX 完成中断刚提交的 `EncoderGetLatestAngle()`；SPI 搬运不占用 CPU 轮询时间。
 2. 用 `angle_offset` 修正机械零点。
 3. 将机械角度换算为电角度 `eangle_get`，并加 90 度相位偏置。
 4. `Clarke_Park(ia, ib, ic)` 将三相电流转换到 d/q 轴。

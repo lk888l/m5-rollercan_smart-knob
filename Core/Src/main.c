@@ -78,26 +78,15 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-void IAP_Set()
+void IAP_Set(void)
 {
-	uint8_t i;
- 
-	uint32_t *pVecTab=(uint32_t *)(0x20000000);
-
-	for(i = 0; i < 48; i++)
-	{
-		*(pVecTab++) = *(__IO uint32_t*)(APPLICATION_ADDRESS + (i<<2));
-	}
-  /* Enable the SYSCFG peripheral clock*/
-#if 1 //STM32
-  __HAL_RCC_SYSCFG_CLK_ENABLE();
-
-  __HAL_SYSCFG_REMAPMEMORY_SRAM();
-#else //AMP32
-    RCM_EnableAPB2PeriphClock(RCM_APB2_PERIPH_SYSCFG);
-    /* Remap SRAM at 0x00000000 */
-    SYSCFG->CFG1_B.MMSEL = SYSCFG_MemoryRemap_SRAM;
-#endif
+  /* The STM32G431 vector table contains more than the 48 entries copied by
+     the legacy SRAM-remap implementation. DMA2 Channel 1/2 use IRQ 56/57,
+     so their vectors were read from normal SRAM data and faulted on the first
+     encoder DMA completion. Point VTOR at the complete application table. */
+  SCB->VTOR = APPLICATION_ADDRESS;
+  __DSB();
+  __ISB();
 }
 
 __STATIC_INLINE uint32_t GXT_SYSTICK_IsActiveCounterFlag(void)
@@ -741,6 +730,8 @@ void Slave_Complete_Callback(uint8_t *rx_data, uint16_t len)
     else if (rx_data[0] == 0xFD)
     {
       if (rx_data[1] == 1) {
+        HAL_NVIC_DisableIRQ(DMA2_Channel1_IRQn);
+        HAL_NVIC_DisableIRQ(DMA2_Channel2_IRQn);
         LL_I2C_DeInit(I2C1);
         LL_I2C_DisableAutoEndMode(I2C1);
         LL_I2C_Disable(I2C1);

@@ -55,7 +55,8 @@ ENTRY(Reset_Handler)
 /* Specify the memory areas */
 MEMORY
 {
-/* 0x20000000-0x200000BF is used by IAP_Set() for the remapped vector table. */
+/* Keep the legacy bootloader handoff scratch area reserved. The application
+   uses SCB->VTOR for full interrupt-vector coverage. */
 RAM (xrw)      : ORIGIN = 0x200000C0, LENGTH = 0x7F40
 /* Page 59 (0x0801D800..0x0801DFFF) is reserved for persistent settings. */
 FLASH (rx)      : ORIGIN = 0x08002000, LENGTH = 0x1B800

@@ -360,7 +360,7 @@ void MotorDriverInit(void)
     motor_driver_cal_busy=0;
 }
 
-void MotorDriverProcess(void)
+void MotorDriverPrepareCycleFromISR(void)
 {
     FastControlCommandSnapshot command;
     if (FastControlConsumeCommandFromISR(&command)) {
@@ -372,8 +372,11 @@ void MotorDriverProcess(void)
             iq_curr_pi_target = command.iq_target_adc;
         }
     }
+}
 
-    angle_get=16383-EncoderGetAngle();
+void MotorDriverProcess(void)
+{
+    angle_get=16383-EncoderGetLatestAngle();
     if( angle_get>angle_offset )
     {
         angle_corrected = angle_get-angle_offset;
@@ -651,7 +654,7 @@ float32_t MotorDriverGetPhaseCurrentReal(void)
 
 void mt6816_update(void)
 {
-    EncoderGetAngle();    
+    (void)EncoderGetLatestAngle();
 }
 
 void MotorDriverSetUq(float32_t uq_set)

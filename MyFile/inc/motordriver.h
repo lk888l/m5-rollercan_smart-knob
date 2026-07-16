@@ -19,6 +19,7 @@ extern float32_t last_angle_corrected;
 extern float32_t angle_corrected;
 
 void MotorDriverInit(void);
+void MotorDriverPrepareCycleFromISR(void);
 void MotorDriverProcess(void);
 void MotorDriverInterrupt(void);
 

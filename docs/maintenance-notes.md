@@ -37,14 +37,14 @@ arm-none-eabi-nm --print-size --size-sort --radix=d build\Debug\ROLLERCAN.elf
 
 ## 实时上下文约束
 
-TIM1 更新中断里会运行 FOC 和控制逻辑，注意：
+TIM1 update ISR 只启动编码器 DMA；DMA2 RX 完成 ISR 提交角度并接续 FOC。1 kHz 外环、保护和 SmartKnob 正常运行时由 ControlTask 负责。注意：
 
-- 不要在 TIM1 中断路径里做 Flash 擦写。
+- 不要在 TIM1/DMA2 快环路径里做 Flash 擦写。
 - 不要做长时间阻塞 I2C/CAN 操作。
-- OLED 绘制和 WS2812 发送应留在主循环。
+- OLED 绘制和 WS2812 发送应留在 MaintenanceTask。
 - 增加滤波或计算时要考虑 FOC 频率和中断耗时。
 
-CAN callback 当前会直接执行一些 I2C 桥接读写。若后续遇到实时性问题，可以考虑改为主循环任务队列。
+FDCAN callback 只通知 CommunicationTask；帧读取、回复发送和 CAN-I2C 桥接都在该任务中执行。I2C1 从机回调仍是尚未完全任务化的例外，其 IRQ 优先级必须低于 TIM1/DMA2 快环。
 
 ## 单位和缩放
 

@@ -4,7 +4,7 @@
 
 SmartKnob 触感环完全运行在 STM32 固件中：ControlTask 以 1 kHz 读取本机机械角度和速度、更新 detent 状态机并直接给出 q 轴电流目标。上位机只负责切换预设、在线修改参数和显示固件主动上报的状态，不参与逐周期电流闭环。
 
-这样 CAN 延迟、Windows 调度抖动或上位机暂时卡顿不会进入触感闭环。原有约 18.67 kHz FOC 电流环仍位于 TIM1 ISR，SmartKnob 不修改电流环和 PWM 实现。
+这样 CAN 延迟、Windows 调度抖动或上位机暂时卡顿不会进入触感闭环。原有约 18.67 kHz FOC 电流环由 TIM1 更新中断启动编码器 DMA，并在 DMA2 RX 完成 ISR 内接续本周期 FOC；SmartKnob 不修改电流环和 PWM 实现。
 
 ## 模块
 
@@ -62,7 +62,7 @@ current = current_scale * pid + friction_current + click_current
 - 单中心回弹模式在 20–45 rad/s 区间逐步削弱与旋转同向的加速电流，保留反向阻尼电流，避免长行程回正持续加速。
 - 速度达到 60 rad/s 后进入高速保护并把电流目标归零；只有速度降到 40 rad/s 后才退出，避免阈值附近反复启停。
 - 电流同时受模式 `current_limit_a`、`max_current_permille` 和硬件 1.2 A 上限约束。
-- 绝对值不超过 0.06 A 的目标进入输出死区。
+- SmartKnob 绝对值不超过 0.09 A 的目标进入输出死区；底层通用电机驱动仍保留 60 mA 死区。
 - 编码器单步不连续或进入 Dial 后 300 ms 稳定期内，电流目标归零。无效样本仍会推进原始位置基线，连续两个合理样本后重新同步滤波位置，因此单次跳变或真实高速转动不会永久锁死触感输出。
 
 ## CAN 参数

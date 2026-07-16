@@ -5,7 +5,7 @@
 职责：
 
 - 应用入口。
-- SRAM 向量表重映射。
+- 通过 `SCB->VTOR` 选择 `0x08002000` 的完整应用向量表。
 - Flash 配置初始化/写回。
 - I2C 从机寄存器协议分发。
 - 系统时钟配置。
@@ -14,7 +14,7 @@
 
 | 函数 | 运行方式 |
 | --- | --- |
-| `IAP_Set()` | `main()` 最早调用，复制应用向量表到 SRAM 并 remap |
+| `IAP_Set()` | `main()` 最早调用，将 `SCB->VTOR` 指向完整应用向量表 |
 | `micros()` | 基于 SysTick 和 HAL tick 生成微秒时间，PID/SmartKnob 使用 |
 | `init_flash_data()` | 启动时读取 Flash 或写入默认配置 |
 | `flash_data_write_back()` | 保存当前配置到 Flash |
@@ -36,10 +36,11 @@
 | `InitMysys()` | 上电初始化 ADC、PWM、电机、编码器、Flash、OLED、通信 |
 | `LoopMysysOnce()` | MaintenanceTask 调用的慢速单步函数 |
 | `MysysStorageOnce()` | StorageTask 调用的安全写回单步函数 |
-| `Loop_FOC()` | 约 18.67 kHz TIM1 ISR 调用，运行 FOC 和 ADC 处理 |
+| `Loop_FOC()` | 约 18.67 kHz DMA2 RX 完成 ISR 调用，运行 FOC 和 ADC 处理 |
 | `Loop_Control()` | 1 kHz ControlTask 调用，计算机械状态和保护 |
 | `MysysControlStep()` | 1 kHz 外环、模式状态机和 SmartKnob 入口 |
-| `MysysFastLoopISR()` | TIM1 update ISR helper |
+| `MysysFastLoopISR()` | TIM1 update ISR helper，启动编码器 DMA |
+| `MysysFastLoopOnEncoderSampleFromISR()` | DMA2 完成后提交同周期样本并接续 FOC |
 | `speed_pid()` / `pos_pid()` | ControlTask 中的速度/位置外环，输出电流目标 |
 | `crc8_MAXIM()` | 旧串口协议遗留 CRC helper |
 
@@ -82,13 +83,15 @@
 
 职责：
 
-- 使用 SPI1 读取 TLE5012B 编码器。
+- 使用 SPI1 + DMA2 两字 normal 传输读取 TLE5012B 编码器。
 - 通过 PA4 软件控制 CS。
+- 处理 RX 完成、TX/RX 错误、超时和陈旧样本诊断。
 
 运行：
 
 - `EncoderInit()` 在 `InitMysys()` 中调用。
-- `EncoderGetAngle()` 被 `MotorDriverProcess()` 高频调用。
+- `EncoderStartDmaReadFromISR()` 被 TIM1 update ISR 高频调用。
+- `EncoderGetLatestAngle()` 在 DMA 完成后由 `MotorDriverProcess()` 读取，不发起 SPI 事务。
 
 ## `MyFile/src/encoder.c`
 
@@ -275,8 +278,8 @@
 
 职责：
 
-- DMA1 和 DMAMUX 时钟。
-- ADC DMA 和 TIM3 DMA 中断优先级。
+- DMA1、DMA2 和 DMAMUX 时钟。
+- ADC DMA、TIM3 DMA 以及 SPI1 RX/TX DMA 通道和中断优先级。
 
 ## `Core/Src/stm32g4xx_it.c`
 

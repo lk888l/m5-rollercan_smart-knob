@@ -74,7 +74,7 @@ OLED 由 `MyFile/src/oled_u8g2.c` 和 `MyFile/src/u8g2_disp_fun.c` 驱动。
 菜单运行特点：
 
 - 菜单期间调用 `MotorDriverSetMode(MDRV_MODE_RUN)`，并把 `motor_mode` 临时切到 `MODE_DIAL`。
-- `handle_smart_knob()` 在 TIM1 控制分支里继续运行。
+- 调度器启动前，`handle_smart_knob()` 由 DMA 完成 ISR 的启动兼容调度短暂运行；正常运行后由 1 kHz ControlTask 负责。
 - `u8g2_disp_menu_update()` 通过 `current_position` 的增减映射成 `encoder_up/down`，用旋钮导航。
 - 单击确认或退出。
 - 退出时关闭电机，恢复 Flash 中保存的原模式。

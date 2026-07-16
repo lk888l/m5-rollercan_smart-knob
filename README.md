@@ -49,7 +49,7 @@ STM32G431XX_FLASH.ld  GCC 链接脚本
 
 ## 一句话运行图
 
-`main()` 完成外设初始化和 `InitMysys()` 后启动 FreeRTOS。1 kHz ControlTask 独占外环、保护状态机、SmartKnob 和本机控制状态；CommunicationTask 独占 FDCAN FIFO/发送并隔离 CAN-I2C 桥接；MaintenanceTask 负责 UI/按键/慢速维护，StorageTask 在电机停止后执行 Flash 写回。TIM1 中断只保留约 18.67 kHz FOC。ControlTask 与 FOC 通过带序号的驱动命令和传感器快照交换数据。
+`main()` 完成外设初始化和 `InitMysys()` 后启动 FreeRTOS。1 kHz ControlTask 独占外环、保护状态机、SmartKnob 和本机控制状态；CommunicationTask 独占 FDCAN FIFO/发送并隔离 CAN-I2C 桥接；MaintenanceTask 负责 UI/按键/慢速维护，StorageTask 在电机停止后执行 Flash 写回。TIM1 中断以约 18.67 kHz 启动编码器 DMA，DMA2 RX 完成中断提交同周期角度并接续 FOC。ControlTask 与 FOC 通过带序号的驱动命令和传感器快照交换数据。
 
 ```text
 上电
@@ -65,7 +65,10 @@ STM32G431XX_FLASH.ld  GCC 链接脚本
 
 TIM1_UP_TIM16_IRQHandler
   -> MysysFastLoopISR
-       -> Loop_FOC
+       -> 启动 TLE5012B SPI1 DMA2
+DMA2_Channel1_IRQHandler
+  -> 提交本周期编码器角度
+  -> Loop_FOC
 ```
 
 ## 构建

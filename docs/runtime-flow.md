@@ -4,7 +4,7 @@
 
 `Core/Src/main.c` 的 `main()` 是唯一应用入口。
 
-1. `IAP_Set()` 将应用区 `0x08002000` 的向量复制到 SRAM，并 remap 到 `0x00000000`。
+1. `IAP_Set()` 将 `SCB->VTOR` 指向应用区 `0x08002000` 的完整向量表。不能只复制旧实现中的 48 个向量；DMA2 Channel 1/2 为 IRQ 56/57，必须保留更高编号的中断入口。
 2. `HAL_Init()` 初始化 HAL、SysTick 和 Flash 接口。
 3. `SystemClock_Config()` 使用 HSI+PLL 配置系统时钟。
 4. 依次初始化 GPIO、DMA、ADC1、TIM1、SPI1、TIM3、I2C1 和 FDCAN1。
@@ -20,20 +20,22 @@
 2. `MyADCInit()` 启动 ADC 校准和 circular DMA。
 3. 设置 TIM1 CH4 ADC 触发点。
 4. `MotorDriverInit()` 初始化 FOC 状态。
-5. `EncoderInit()` 使能 TLE5012B 使用的 SPI1。
-6. 启动 TIM1 CH1/CH2/CH3 PWM。
-7. 延时 20 ms 后执行 `MyADCZeroCal()`。
-8. 清除 TIM1 update pending flag，然后开启 update IRQ。
-9. 读取 Flash 配置并初始化 OLED；按键按住上电时可进入阻塞式本地配置菜单。
-10. 初始化 PID、I2C/FDCAN 通信和启动界面。
+5. `EncoderInit()` 使能 TLE5012B 使用的 SPI1，并准备 DMA2 RX/TX 固定缓冲与通道。
+6. `EncoderPrimeDmaRead()` 在 IRQ 关闭时执行一次有界 DMA 预热并提交首个有效角度。
+7. 启动 TIM1 CH1/CH2/CH3 PWM。
+8. 延时 20 ms 后执行 `MyADCZeroCal()`。
+9. 保持 TIM1 连续运行，等待并清除一个自然 repetition update，再开启 update IRQ。
+10. 读取 Flash 配置并初始化 OLED；按键按住上电时可进入阻塞式本地配置菜单。
+11. 初始化 PID、I2C/FDCAN 通信和启动界面。
 
-顺序 4～8 不可随意交换。若 SPI1 启用前进入 `Loop_FOC()`，编码器传输会等不到 RXNE。当前 SPI 轮询虽然已有超时，不再永久锁死，但启动数据仍然无效。
+顺序 4～9 不可随意交换。若 SPI1 和 DMA2 通道准备完成前开启 TIM1 update IRQ，首次编码器事务无法产生有效 DMA 完成事件。直接停表并从 CNT=0 重启中心对齐 TIM1 也可能保留下降方向并制造极短首周期，因此这里对齐到持续运行中的自然 update。
 
 ## FreeRTOS 运行上下文
 
 | 上下文 | 周期/触发 | 职责 |
 | --- | --- | --- |
-| TIM1 update ISR | 约 18.67 kHz | 只运行 `Loop_FOC()`；不调用 FreeRTOS API |
+| TIM1 update ISR | 约 18.67 kHz | 拉低编码器 CS 并启动 DMA2 RX/TX；不调用 FreeRTOS API |
+| DMA2 RX ISR | 每次编码器事务完成 | 提交本周期角度并运行 `Loop_FOC()`；不调用 FreeRTOS API |
 | ControlTask | 1 kHz + 控制邮箱唤醒 | `Loop_Control()`、模式控制、保护、SmartKnob 和本机命令执行 |
 | CommunicationTask | FDCAN/回复唤醒 | 读取 RX FIFO、发送回复、隔离 CAN-I2C 桥接 |
 | MaintenanceTask | 10 ms | I2C 超时恢复、按钮、OLED、RGB、通信慢速维护 |
@@ -48,13 +50,19 @@
 ```c
 void TIM1_UP_TIM16_IRQHandler(void)
 {
-  MysysFastLoopISR();
+  if ((__HAL_TIM_GET_FLAG(&htim1, TIM_FLAG_UPDATE) != RESET) &&
+      (__HAL_TIM_GET_IT_SOURCE(&htim1, TIM_IT_UPDATE) != RESET)) {
+    __HAL_TIM_CLEAR_IT(&htim1, TIM_IT_UPDATE);
+    MysysFastLoopISR();
+  }
 }
 ```
 
-TIM1 使用 center-aligned PWM，repetition counter 为 2。PWM 和 ADC 触发周期保持不变，update IRQ 降到约 18.67 kHz。`MysysFastLoopISR()` 每次执行 `Loop_FOC()`。
+TIM1 使用 center-aligned PWM，repetition counter 为 2。PWM 和 ADC 触发周期保持不变，update IRQ 降到约 18.67 kHz。`MysysFastLoopISR()` 只启动两字 SPI DMA；约 6.1 μs 后，DMA2 Channel 1 完成中断提交新角度并调用 `MysysFastLoopOnEncoderSampleFromISR()` 执行 `Loop_FOC()`。因此 FOC 使用的是同一 TIM1 周期发起的采样，而不是上一周期角度。
 
-调度器启动前，ISR 还会用整数相位累加器短暂运行旧外环；ControlTask 调用 `MysysControlTaskBegin()` 后关闭这条兼容路径。因此稳态时 ISR 不再运行 `Loop_Control()`、速度/位置 PID 或 SmartKnob。
+入口还检查 TIM1 当前方向、CNT 到下一边界的余量以及 NVIC pending。启动兼容外环若让某个 update 严重迟到，该事件会记入 `fast_loop_late_start_count` 并被丢弃，避免启动一个必然跨界的 SPI 帧；下一个正常 update 自动恢复。TIM1 同时启用 debug-freeze，调试器 halt CPU 时不会让定时器继续推进并制造虚假 overlap。
+
+调度器启动前，DMA 完成后的 FOC 还会用整数相位累加器短暂运行旧外环；ControlTask 调用 `MysysControlTaskBegin()` 后关闭这条兼容路径。因此稳态时快环 ISR 不再运行 `Loop_Control()`、速度/位置 PID 或 SmartKnob。
 
 ## 1 kHz 控制路径
 

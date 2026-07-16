@@ -18,8 +18,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Define the build type
 if(NOT CMAKE_BUILD_TYPE)
-    # TIM1 runs the FOC and SmartKnob feedback path; an unoptimised build is
-    # not suitable for a flashed firmware image.
+    # TIM1 triggers the DMA-backed fast FOC path; SmartKnob feedback runs in
+    # ControlTask. An unoptimised build is not suitable for a flashed image.
     set(CMAKE_BUILD_TYPE "Release")
 endif()
 

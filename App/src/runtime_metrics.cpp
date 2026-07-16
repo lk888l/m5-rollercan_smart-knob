@@ -22,6 +22,14 @@ void UpdateMaximum(volatile uint32_t &maximum, uint32_t value)
 extern "C" {
 volatile uint32_t runtime_foc_last_cycles = 0U;
 volatile uint32_t runtime_foc_max_cycles = 0U;
+volatile uint32_t runtime_foc_cpu_last_cycles = 0U;
+volatile uint32_t runtime_foc_cpu_max_cycles = 0U;
+volatile uint32_t runtime_encoder_dma_last_cycles = 0U;
+volatile uint32_t runtime_encoder_dma_max_cycles = 0U;
+volatile uint32_t runtime_tim1_isr_last_cycles = 0U;
+volatile uint32_t runtime_tim1_isr_max_cycles = 0U;
+volatile uint32_t runtime_encoder_dma_isr_last_cycles = 0U;
+volatile uint32_t runtime_encoder_dma_isr_max_cycles = 0U;
 volatile uint32_t runtime_control_last_cycles = 0U;
 volatile uint32_t runtime_control_max_cycles = 0U;
 volatile uint32_t runtime_control_period_min_cycles = UINT32_MAX;
@@ -46,6 +54,11 @@ extern "C" uint32_t RuntimeMetricsCycleNow(void)
     return metrics_enabled ? DWT->CYCCNT : 0U;
 }
 
+extern "C" uint32_t RuntimeMetricsElapsedSince(uint32_t start_cycles)
+{
+    return metrics_enabled ? (DWT->CYCCNT - start_cycles) : 0U;
+}
+
 extern "C" void RuntimeMetricsRecordFoc(uint32_t start_cycles)
 {
     if (!metrics_enabled) {
@@ -55,6 +68,49 @@ extern "C" void RuntimeMetricsRecordFoc(uint32_t start_cycles)
     const uint32_t elapsed = DWT->CYCCNT - start_cycles;
     runtime_foc_last_cycles = elapsed;
     UpdateMaximum(runtime_foc_max_cycles, elapsed);
+}
+
+extern "C" void RuntimeMetricsRecordFocCpu(uint32_t active_cycles)
+{
+    if (!metrics_enabled) {
+        return;
+    }
+
+    runtime_foc_cpu_last_cycles = active_cycles;
+    UpdateMaximum(runtime_foc_cpu_max_cycles, active_cycles);
+}
+
+extern "C" void RuntimeMetricsRecordEncoderDma(uint32_t start_cycles)
+{
+    if (!metrics_enabled) {
+        return;
+    }
+
+    const uint32_t elapsed = DWT->CYCCNT - start_cycles;
+    runtime_encoder_dma_last_cycles = elapsed;
+    UpdateMaximum(runtime_encoder_dma_max_cycles, elapsed);
+}
+
+extern "C" void RuntimeMetricsRecordTim1Isr(uint32_t start_cycles)
+{
+    if (!metrics_enabled) {
+        return;
+    }
+
+    const uint32_t elapsed = DWT->CYCCNT - start_cycles;
+    runtime_tim1_isr_last_cycles = elapsed;
+    UpdateMaximum(runtime_tim1_isr_max_cycles, elapsed);
+}
+
+extern "C" void RuntimeMetricsRecordEncoderDmaIsr(uint32_t start_cycles)
+{
+    if (!metrics_enabled) {
+        return;
+    }
+
+    const uint32_t elapsed = DWT->CYCCNT - start_cycles;
+    runtime_encoder_dma_isr_last_cycles = elapsed;
+    UpdateMaximum(runtime_encoder_dma_isr_max_cycles, elapsed);
 }
 
 extern "C" uint32_t RuntimeMetricsControlBegin(void)

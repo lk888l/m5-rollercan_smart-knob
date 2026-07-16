@@ -89,7 +89,7 @@ CMake 在每次链接后自动生成上述 HEX/BIN。已有 bootloader 时使用
 - ST-LINK CLI/OpenOCD：按本地调试器配置烧录。
 - MDK：打开 `MDK-ARM/ROLLERCAN.uvprojx` 后使用 IDE 的下载功能。
 
-如果烧录 `.bin`，注意链接脚本和 `IAP_Set()` 暗示应用向量表使用 `APPLICATION_ADDRESS = 0x08002000`。确认启动链路时要同时检查 bootloader、烧录偏移和向量表 remap 逻辑。
+如果烧录普通 `ROLLERCAN.bin`，加载地址必须是 `0x08002000`；不能从 `0x08000000` 开始下载，否则整个应用会下移 `0x2000`，复位向量仍跳到原链接地址并立即异常。独立调试应优先烧录 `ROLLERCAN_standalone.hex`，它同时包含 `0x08000000` 的冷启动向量镜像和 `0x08002000` 的完整应用。`IAP_Set()` 随后通过 `SCB->VTOR` 使用应用向量表。
 
 ## 尺寸分析
 
