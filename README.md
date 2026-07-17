@@ -1,92 +1,179 @@
-# ROLLERCAN 固件文档
+# ROLLERCAN Firmware Documentation
 
-ROLLERCAN 是一个基于 STM32G431 的无刷电机控制固件。工程由 STM32CubeMX 生成的 HAL/LL 外设初始化代码、`MyFile` 目录下的业务控制模块、裁剪后的 `U8g2_lib` 显示库，以及 CMake/MDK 两套工程入口组成。
+[简体中文](README_zh.md) | English
 
-固件的核心职责是：
+This firmware is customized specifically for the **smart knob feature** of the **hex-usb-canfd-hub** product. It works seamlessly with the **hex-usb-canfd-hub** and its companion graphical host application, providing access to the built-in smart knob functionality.
 
-- 通过 TIM1 三相 PWM 和 ADC 采样运行 FOC 电流环。
-- 通过 TLE5012B SPI 编码器得到转子角度和机械位置。
-- 提供速度、位置、电流和 Dial/SmartKnob 四类运行模式。
-- 通过 I2C 从机寄存器协议和 CAN 扩展帧协议收发控制命令。
-- 在 64x48 SSD1306 OLED 和 2 颗 SK6812/WS2812 灯珠上显示状态、菜单和告警。
-- 将 I2C 地址、CAN ID、通信模式、PID 参数和保护开关等配置保存到片内 Flash。
+This is dedicated firmware for the **M5 Stack RollerCAN**, modified from the [official open-source firmware](https://github.com/m5stack/M5Unit-RollerCAN-Internal-FW) released by M5Stack.
 
-## 快速入口
+ROLLERCAN is a brushless motor control firmware based on the STM32G431. The project consists of STM32CubeMX-generated HAL/LL peripheral initialization code, application control modules under `MyFile`, a trimmed `U8g2_lib` display library, and separate CMake and MDK project entry points.
 
-| 文档 | 内容 |
+The firmware's core responsibilities are:
+
+- Running the FOC current loop using TIM1 three-phase PWM and ADC sampling.
+- Obtaining the rotor angle and mechanical position through the TLE5012B SPI encoder.
+- Providing four operating modes: speed, position, current, and Dial/SmartKnob.
+- Sending and receiving control commands through an I2C slave register protocol and a CAN extended-frame protocol.
+- Displaying status, menus, and alerts on a 64x48 SSD1306 OLED and two SK6812/WS2812 LEDs.
+- Saving settings such as the I2C address, CAN ID, communication mode, PID parameters, and protection switches to internal Flash.
+
+## Quick Links
+
+| Document | Description |
 | --- | --- |
-| [系统架构](docs/architecture.md) | 目录结构、模块分层、数据流、上下文边界 |
-| [C++/FreeRTOS 重构](docs/freertos-refactor.md) | 当前迁移状态、任务/ISR 边界、频率和后续硬件验证门槛 |
-| [启动与运行流程](docs/runtime-flow.md) | 上电初始化、主循环、TIM1 中断调度、模式切换 |
-| [构建与烧录](docs/build-and-flash.md) | CMake/MDK 工程、工具链、构建命令、产物 |
-| [外设与引脚](docs/peripherals.md) | TIM/ADC/SPI/I2C/FDCAN/GPIO/DMA 的用途 |
-| [控制链路](docs/control-loop.md) | FOC、电流环、速度环、位置环、电流模式、Dial 模式 |
-| [固件 SmartKnob](docs/smartknob-firmware.md) | 模块化模式、默认预设、CAN 在线配置和主动遥测 |
-| [通信协议](docs/communication-protocol.md) | I2C 寄存器表、CAN 命令、CAN-I2C 桥接 |
-| [显示与输入](docs/display-and-input.md) | OLED 页面、菜单、按键、灯效 |
-| [持久化配置](docs/persistence.md) | Flash 数据布局、读写时机、保护状态保存 |
-| [模块参考](docs/module-reference.md) | 每个源文件/模块的职责和运行方式 |
-| [维护注意事项](docs/maintenance-notes.md) | CubeMX 再生成、U8g2 裁剪、调试建议 |
+| [System Architecture](docs/architecture.md) | Directory structure, module layers, data flow, and context boundaries |
+| [C++/FreeRTOS Refactoring](docs/freertos-refactor.md) | Current migration status, task/ISR boundaries, frequencies, and remaining hardware validation gates |
+| [Startup and Runtime Flow](docs/runtime-flow.md) | Power-on initialization, main loop, TIM1 interrupt scheduling, and mode switching |
+| [Build and Flash](docs/build-and-flash.md) | CMake/MDK projects, toolchains, build commands, and artifacts |
+| [Peripherals and Pins](docs/peripherals.md) | Uses of TIM, ADC, SPI, I2C, FDCAN, GPIO, and DMA |
+| [Control Path](docs/control-loop.md) | FOC, current loop, speed loop, position loop, current mode, and Dial mode |
+| [Firmware SmartKnob](docs/smartknob-firmware.md) | Modular modes, default presets, online CAN configuration, and active telemetry |
+| [Communication Protocol](docs/communication-protocol.md) | I2C register table, CAN commands, and the CAN-I2C bridge |
+| [Display and Input](docs/display-and-input.md) | OLED pages, menus, buttons, and lighting effects |
+| [Persistent Configuration](docs/persistence.md) | Flash data layout, read/write timing, and protection-state storage |
+| [Module Reference](docs/module-reference.md) | Responsibilities and runtime behavior of each source file/module |
+| [Maintenance Notes](docs/maintenance-notes.md) | CubeMX regeneration, U8g2 trimming, and debugging recommendations |
 
-## 代码地图
+## Code Map
 
 ```text
 Core/
-  Inc/, Src/          STM32CubeMX 生成的外设初始化、中断入口和系统文件
+  Inc/, Src/          CubeMX-generated peripheral initialization, interrupt entry points, and system files
 App/
-  inc/, src/          C++17/FreeRTOS 静态任务和 C/C++ 边界
-Middlewares/
-  Third_Party/        STM32CubeG4 配套的 FreeRTOS 内核
+  inc/, src/          C++17/FreeRTOS static tasks and C/C++ boundaries
+ThirdParty/
+  FreeRTOS-Kernel/    FreeRTOS kernel and Cortex-M4F port outside the CubeMX-managed scope
 MyFile/
-  inc/, src/          手写业务模块：电机控制、系统调度、显示、按键、灯效、ADC、编码器等
-U8g2_lib/             裁剪后的 U8g2/u8x8 显示库源码
-cmake/                CMake 工具链和 CubeMX 生成的 CMake 子工程
-MDK-ARM/              Keil/MDK 工程和旧构建产物
-build/Debug/          CMake Debug 构建目录
-ROLLERCAN.ioc         CubeMX 工程文件
-STM32G431XX_FLASH.ld  GCC 链接脚本
+  inc/, src/          Handwritten application modules: motor control, system scheduling, display, buttons, lighting effects, ADC, encoder, etc.
+U8g2_lib/             Trimmed U8g2/u8x8 display library source
+cmake/                CMake toolchains and the CubeMX-generated CMake subproject
+linker/
+  ROLLERCAN_APP.ld    Application linker script actually used by CMake
+MDK-ARM/              Keil/MDK project and legacy build artifacts
+build/Debug/          CMake Debug build directory
+ROLLERCAN.ioc         CubeMX project file
+STM32G431XX_FLASH.ld  Default linker script generated by CubeMX; not used by CMake
 ```
 
-## 一句话运行图
+## Runtime at a Glance
 
-`main()` 完成外设初始化和 `InitMysys()` 后启动 FreeRTOS。1 kHz ControlTask 独占外环、保护状态机、SmartKnob 和本机控制状态；CommunicationTask 独占 FDCAN FIFO/发送并隔离 CAN-I2C 桥接；MaintenanceTask 负责 UI/按键/慢速维护，StorageTask 在电机停止后执行 Flash 写回。TIM1 中断以约 18.67 kHz 启动编码器 DMA，DMA2 RX 完成中断提交同周期角度并接续 FOC。ControlTask 与 FOC 通过带序号的驱动命令和传感器快照交换数据。
+After `main()` completes peripheral initialization and `InitMysys()`, it starts FreeRTOS. The 1 kHz ControlTask exclusively owns the outer loops, protection state machine, SmartKnob, and local control state. CommunicationTask exclusively owns the FDCAN FIFO/transmission path and isolates the CAN-I2C bridge. MaintenanceTask handles the UI, buttons, and low-frequency maintenance, while StorageTask writes settings back to Flash after the motor has stopped. At approximately 18.67 kHz, the TIM1 interrupt starts an encoder DMA transfer; the DMA2 RX completion interrupt submits the angle sampled during that cycle and then continues with FOC. ControlTask and FOC exchange data through sequenced drive commands and sensor snapshots.
 
 ```text
-上电
+Power-on
   -> HAL_Init/SystemClock_Config
   -> MX_GPIO/MX_DMA/MX_ADC/MX_TIM/MX_SPI/MX_I2C/MX_FDCAN
   -> InitMysys
-       -> ADC DMA / TIM1 PWM / 电机驱动 / 编码器 / Flash 配置 / OLED / 通信
+       -> ADC DMA / TIM1 PWM / motor driver / encoder / Flash settings / OLED / communication
   -> App_StartScheduler
-       -> ControlTask: 1 kHz 外环、保护、SmartKnob 和本机命令执行
-       -> CommunicationTask: FDCAN RX/TX、帧解码和 CAN-I2C 桥接
-       -> MaintenanceTask: 按键、显示、灯效、通信恢复
-       -> StorageTask: 安全状态下的 Flash 写回
+       -> ControlTask: 1 kHz outer loops, protection, SmartKnob, and local command execution
+       -> CommunicationTask: FDCAN RX/TX, frame decoding, and CAN-I2C bridge
+       -> MaintenanceTask: buttons, display, lighting effects, and communication recovery
+       -> StorageTask: Flash write-back while the system is in a safe state
 
 TIM1_UP_TIM16_IRQHandler
   -> MysysFastLoopISR
-       -> 启动 TLE5012B SPI1 DMA2
+       -> Start TLE5012B SPI1 DMA2
 DMA2_Channel1_IRQHandler
-  -> 提交本周期编码器角度
+  -> Submit the encoder angle for the current cycle
   -> Loop_FOC
 ```
 
-## 构建
+## Build
 
-当前 CMake 工程使用 Ninja 和 `arm-none-eabi-*` 工具链：
+The current CMake project uses Ninja and the `arm-none-eabi-*` toolchain:
 
 ```powershell
 cmake --preset Debug
 cmake --build build\Debug
 ```
 
-生成的主要产物位于 `build/Debug/ROLLERCAN.elf`，链接时会输出 `ROLLERCAN.map` 和内存占用。更多说明见 [构建与烧录](docs/build-and-flash.md)。
+The main artifact is generated at `build/Debug/ROLLERCAN.elf`. Linking also produces `ROLLERCAN.map` and prints memory usage. For more information, see [Build and Flash](docs/build-and-flash.md).
 
-## 维护原则
+## Address Offsets and Flashing Artifacts
 
-- `Core/Src/stm32g4xx_it.c` 保留公开 IRQ 入口，TIM1 业务中断逻辑由 `MysysFastLoopISR()` 承担；该函数不得调用 FreeRTOS API。
-- 调度器启动后，CAN 和按键命令必须通过静态队列进入 ControlTask；CommunicationTask 不得直接写 `motor_mode`、setpoint、PID 积分项或 fault state。
-- ControlTask 与 TIM1 ISR 之间的数据必须通过 `fast_control_link` 交换；不要重新从任务直接修改 `currentloop_enable`、电流 PI 积分项或 PWM 驱动使能。
-- `MyFile/src/mysys.c` 是系统状态、模式、PID 和保护逻辑的中心，改模式或单位时先从这里追数据流。
-- `main.c` 中的 `Slave_Complete_Callback()` 是 I2C 寄存器协议入口；`Core/Src/fdcan.c` 是 CAN 协议和 CAN-I2C 桥接入口。
-- `U8g2_lib` 已按当前 OLED 功能裁剪，增加字体或 U8g2 源文件前应先看 map/size。
+To remain compatible with the startup layout of the original firmware, the CMake build does not link the application at the beginning of STM32 Flash or RAM. Instead, it reserves the following regions:
+
+| Region | Address | Purpose |
+| --- | --- | --- |
+| Flash boot region | `0x08000000..0x08001FFF` | Reserves 8 KiB for the original bootloader/startup entry point |
+| Flash application region | `0x08002000..0x0801D7FF` | ROLLERCAN application, length `0x1B800` (110 KiB) |
+| Flash configuration page | `0x0801D800..0x0801DFFF` | Persistent settings; the application linker does not place code here |
+| Reserved RAM region | `0x20000000..0x200000BF` | Reserves `0xC0` bytes for compatibility with the original startup handoff data |
+| Application RAM region | `0x200000C0..0x20007FFF` | RAM actually used by the application |
+
+The offsets are defined in [linker/ROLLERCAN_APP.ld](linker/ROLLERCAN_APP.ld):
+
+```ld
+MEMORY
+{
+  RAM   (xrw) : ORIGIN = 0x200000C0, LENGTH = 0x7F40
+  FLASH (rx)  : ORIGIN = 0x08002000, LENGTH = 0x1B800
+}
+```
+
+The CMake toolchain explicitly selects this user-maintained linker script with `-T`:
+
+```cmake
+set(CMAKE_EXE_LINKER_FLAGS
+    "${CMAKE_EXE_LINKER_FLAGS} -T \"${CMAKE_SOURCE_DIR}/linker/ROLLERCAN_APP.ld\"")
+```
+
+This configuration is located in `cmake/gcc-arm-none-eabi.cmake` and `cmake/starm-clang.cmake`. CubeMX may regenerate `STM32G431XX_FLASH.ld` in the repository root, but CMake does not use that default script, so regeneration does not remove the offsets described above.
+
+The root `CMakeLists.txt` uses `objcopy` after linking to generate three types of flashable artifacts:
+
+```cmake
+# Preserve the addresses in the ELF and generate an application HEX file
+arm-none-eabi-objcopy -O ihex ROLLERCAN.elf ROLLERCAN.hex
+
+# Generate a raw application BIN file with no address information
+arm-none-eabi-objcopy -O binary ROLLERCAN.elf ROLLERCAN.bin
+
+# Extract the interrupt vector table from the application and add a copy at 0x08000000
+# The final output is ROLLERCAN_standalone.hex
+```
+
+Choose the artifact according to the device's startup method. Do not mix multiple flashing approaches:
+
+| Use case | File to flash | Address/notes |
+| --- | --- | --- |
+| Device retains the original bootloader | `build/<Debug or Release>/ROLLERCAN.hex` | The HEX file contains its own addresses and writes the application to `0x08002000`; do not flash `standalone.hex`, which would overwrite the bootloader |
+| Device retains the original bootloader; flashing a raw BIN | `build/<Debug or Release>/ROLLERCAN.bin` | You must manually specify address `0x08002000`; never specify `0x08000000` |
+| Downloading/debugging through ST-LINK/GDB with an existing bootloader | `build/<Debug or Release>/ROLLERCAN.elf` | The ELF contains section addresses and debug symbols; the tool writes the application to `0x08002000` |
+| Full-chip erase with no bootloader; direct cold boot required | `build/<Debug or Release>/ROLLERCAN_standalone.hex` | Writes both the vector-table copy at `0x08000000` and the application at `0x08002000`; flash the complete standalone HEX again for every update |
+
+The most common choices are `ROLLERCAN.hex` when retaining the original bootloader, and `ROLLERCAN_standalone.hex` when running independently after a full-chip erase. `ROLLERCAN.bin` contains no address information and may only be used when `0x08002000` is explicitly entered in the flashing tool. Files under `MDK-ARM/ROLLERCAN/` are legacy MDK build artifacts and must not be used in place of the current CMake artifacts under `build/Debug` or `build/Release`.
+
+## Maintenance Principles
+
+- `Core/Src/stm32g4xx_it.c` retains the public IRQ entry points, while TIM1 application interrupt logic is handled by `MysysFastLoopISR()`; this function must not call FreeRTOS APIs.
+- After the scheduler starts, CAN and button commands must enter ControlTask through static queues. CommunicationTask must not directly write `motor_mode`, setpoints, PID integrator terms, or the fault state.
+- Data exchanged between ControlTask and the TIM1 ISR must go through `fast_control_link`; do not directly modify `currentloop_enable`, current PI integrator terms, or PWM driver enable state from tasks.
+- `MyFile/src/mysys.c` is the center of system state, modes, PID, and protection logic. When changing modes or units, trace the data flow from this file first.
+- `Slave_Complete_Callback()` in `main.c` is the entry point for the I2C register protocol; `Core/Src/fdcan.c` is the entry point for the CAN protocol and CAN-I2C bridge.
+- `U8g2_lib` has been trimmed for the current OLED functionality. Check the map/size before adding fonts or U8g2 source files.
+
+## Related Links
+
+See also examples using conventional methods here.
+
+- [Unit RollerCAN & Datasheet](https://docs.m5stack.com/en/unit/Unit-RollerCAN)
+
+## Related Projects
+
+This project references the following open-source projects.
+
+- [smartknob](https://github.com/scottbez1/smartknob)
+- [PID_Controller](https://github.com/tcleg/PID_Controller)
+- [u8g2](https://github.com/olikraus/u8g2)
+
+## License
+
+- [smartknob][] Copyright (c) 2022 Scott Bezek and licensed under Apache License, Version 2.0 License.
+- [PID_Controller][] Copyright (c) 2013-2014 tcleg and licensed under GPLv3 License.
+- [u8g2][] Copyright (c) 2016 olikraus and licensed under BSD License.
+
+[smartknob]: https://github.com/scottbez1/smartknob
+[PID_Controller]: https://github.com/tcleg/PID_Controller
+[u8g2]: https://github.com/olikraus/u8g2

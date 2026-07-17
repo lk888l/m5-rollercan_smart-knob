@@ -2,12 +2,32 @@
 
 ## CubeMX 再生成
 
-CubeMX 可能重新生成 `Core/Src/stm32g4xx_it.c`、外设初始化文件和 `cmake/stm32cubemx/CMakeLists.txt`。再生成后重点检查：
+本工程已使用 CubeMX 6.17.0、STM32CubeG4 1.6.3 实际执行连续再生成验证。`ROLLERCAN.ioc` 必须保持：
 
-- `TIM1_UP_TIM16_IRQHandler()` 是否仍在 USER CODE 区调用 `MysysFastLoopISR()`，且没有再次调用 `HAL_TIM_IRQHandler()`。
+- `ProjectManager.KeepUserCode=true`，保留 IRQ 和外设初始化中的用户区。
+- `ProjectManager.DeletePrevious=false`，减少生成器清理无关输出的范围。CubeMX 仍会重建
+  `Middlewares`，因此手工 FreeRTOS kernel/port 固定放在生成器管理范围之外的
+  `ThirdParty/FreeRTOS-Kernel`。
+
+CubeMX 可能重新生成 `Core/Src/stm32g4xx_it.c`、外设初始化文件、默认
+`STM32G431XX_FLASH.ld` 和 `cmake/stm32cubemx/CMakeLists.txt`。实际应用固定使用
+`linker/ROLLERCAN_APP.ld`，因此默认链接脚本被恢复为 `0x08000000/128K` 不影响 CMake 构建。
+再生成后重点检查：
+
+- `TIM1_UP_TIM16_IRQHandler()` 只能由 `stm32g4xx_it.c` 定义一次；其 `IRQn 0`
+  用户区调用 `MysysFastLoopISR()` 后必须 `return`，不能落入 CubeMX 生成的
+  `HAL_TIM_IRQHandler()`。
+- DMA2 Channel 1/2 的 `IRQn 0` 用户区是否仍分别调用
+  `EncoderHandleDmaRxIRQ()` / `EncoderHandleDmaTxIRQ()` 并提前 `return`。
+- `USER CODE BEGIN PM` 中的 `SVC_Handler` / `PendSV_Handler` 重命名宏是否仍存在，
+  确保实际中断向量只由 FreeRTOS port 提供。
 - `I2C1_EV_IRQHandler()` 是否仍调用 `i2c1_event_irq_handler()`。
 - `I2C1_ER_IRQHandler()` 是否仍调用 `i2c1_error_irq_handler()`。
-- 根 `CMakeLists.txt` 是否仍加入 `App/src/app_rtos.cpp`、FreeRTOS kernel/port、`Core/Src/flash.c`、`Core/Src/i2c_ex.c`、`MyFile/src/*.c` 和裁剪后的 U8g2 源。
+- 根 `CMakeLists.txt` 是否仍加入 `App/src/app_rtos.cpp`、
+  `ThirdParty/FreeRTOS-Kernel`、`Core/Src/flash.c`、`Core/Src/i2c_ex.c`、
+  `MyFile/src/*.c` 和裁剪后的 U8g2 源。
+- `cmake/gcc-arm-none-eabi.cmake` 和 `cmake/starm-clang.cmake` 是否仍引用
+  `linker/ROLLERCAN_APP.ld`。
 
 公开 IRQ 入口函数不要复制到 `MyFile` 或其他源文件中，否则链接时会出现重复定义。正确做法是：
 

@@ -49,14 +49,21 @@
 *****************************************************************************
 */
 
+/* Application-owned linker script. Keep this outside CubeMX's generated
+   STM32G431XX_FLASH.ld path so code regeneration cannot reset the bootloader
+   offset, reserved RAM handoff area, or persistent-settings page. */
+
 /* Entry Point */
 ENTRY(Reset_Handler)
 
 /* Specify the memory areas */
 MEMORY
 {
-RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 32K
-FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 128K
+/* Keep the legacy bootloader handoff scratch area reserved. The application
+   uses SCB->VTOR for full interrupt-vector coverage. */
+RAM (xrw)      : ORIGIN = 0x200000C0, LENGTH = 0x7F40
+/* Page 59 (0x0801D800..0x0801DFFF) is reserved for persistent settings. */
+FLASH (rx)      : ORIGIN = 0x08002000, LENGTH = 0x1B800
 }
 
 /* Highest address of the user mode stack */
