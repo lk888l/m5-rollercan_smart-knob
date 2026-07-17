@@ -26,7 +26,6 @@
 #define     SQRT3_MULT_TS   (float32_t)((float32_t)TS * SQRT3)
 #define     LIMIT           (float32_t)(0.9f / SQRT3)
 #define     MOTOR_CURRENT_OUTPUT_DEADBAND_MA 60.0f
-
 volatile uint8_t currentloop_enable;
 uint8_t motor_driver_cal_flag;
 uint8_t motor_driver_cal_init;
@@ -436,9 +435,10 @@ void MotorDriverProcess(void)
     if(currentloop_enable)
     {
         if (motor_driver_cal_busy == 0U && iq_curr_pi_target == 0.0f) {
-            /* A deadband command must be electrically quiet, not merely a
+            /* An exact-zero command must be electrically quiet, not merely a
              * zero current target that leaves both PI loops correcting ADC
-             * offset/noise around zero. */
+             * offset/noise around zero. Small non-zero torque requests stay
+             * continuous; clamping them here creates a relay limit cycle. */
             CurrentLoopResetOutput();
         } else {
             CurrentLoopCalc(6.4f);
@@ -620,17 +620,11 @@ void MotorDriverSetCurrentAdc(int32_t phase_current)
 //data type: float32_t
 //range: -1200.0f ~ 1200.0f, 0means 0current, motor spins free.
 // e.g.:  1.0f = 1mA, 1000.0f means about 1.0A
-void MotorDriverSetCurrentReal(float32_t phase_current)
+void MotorDriverSetCurrentRealContinuous(float32_t phase_current)
 {
     float32_t iq_calc = 0.0f;
     if(motor_driver_cal_busy ==0 )
     {
-        /* Suppress low-current commands that cannot produce stable torque and
-         * otherwise make the motor vibrate around zero output. */
-        if(phase_current >= -MOTOR_CURRENT_OUTPUT_DEADBAND_MA &&
-           phase_current <= MOTOR_CURRENT_OUTPUT_DEADBAND_MA) {
-            phase_current = 0.0f;
-        }
         if(phase_current> 1200.0f)//1.2A
         phase_current= 1200.0f;
         if(phase_current< -1200.0f)//-1.2A
@@ -638,6 +632,18 @@ void MotorDriverSetCurrentReal(float32_t phase_current)
         iq_calc = phase_current * 1.25f ;
         FastControlPublishCurrentAdc(iq_calc);
     }
+}
+
+void MotorDriverSetCurrentReal(float32_t phase_current)
+{
+    /* Preserve the established quiet-zone behavior for the normal current,
+       speed and position modes. SmartKnob uses the continuous entry point
+       because a magnitude deadband creates a torque step inside a detent. */
+    if(phase_current >= -MOTOR_CURRENT_OUTPUT_DEADBAND_MA &&
+       phase_current <= MOTOR_CURRENT_OUTPUT_DEADBAND_MA) {
+        phase_current = 0.0f;
+    }
+    MotorDriverSetCurrentRealContinuous(phase_current);
 }
 
 //Get motor real-time phase current by ADC value

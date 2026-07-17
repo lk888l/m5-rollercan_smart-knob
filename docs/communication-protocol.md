@@ -11,7 +11,7 @@
 | 2 | `COMM_TYPE_CAN` | 本机启用 CAN 协议 |
 | 3 | `COMM_TYPE_CAN_I2C` | 本机同时启用 I2C 和 CAN，CAN 可桥接 I2C |
 
-启动时 `InitMysys()` 读取 Flash 中保存的 `comm_type`，然后选择初始化路径。
+启动时 `InitMysys()` 读取 Flash 中保存的 `comm_type`，然后选择初始化路径。page 59 没有有效配置时默认使用 `COMM_TYPE_CAN`；没有版本标记的旧配置会先在 RAM 中迁移到 CAN，版本标记随下一次正常配置保存写入。标记写入后，用户显式保存的通信模式仍优先。
 
 ## I2C 从机协议
 

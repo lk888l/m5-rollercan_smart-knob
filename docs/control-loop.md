@@ -47,8 +47,8 @@ FOC 实现在 `MyFile/src/motordriver.c`。
 - `id_curr_pi_target` 默认 0。
 - `iq_curr_pi_target` 由 `MotorDriverSetCurrentAdc()` 或 `MotorDriverSetCurrentReal()` 设置。
 - `MotorDriverSetCurrentReal(phase_current)` 的单位是 mA，内部乘以 1.25 得到 ADC/PI 目标。
-- `MotorDriverSetCurrentReal()` 会把绝对值不超过 60 mA 的目标归零，抑制零点附近的低电流震动。
-- 死区生效时，FOC ISR 同时清零 Id/Iq PI 状态和 `ud/uq`，避免电流环继续追踪零点采样偏置；遥测中的实测电流仍可能显示 ADC 的小幅零点噪声。
+- 普通电流、速度和位置模式保留 60 mA 静音区；SmartKnob 通过连续电流入口绕过该幅值死区，避免弹簧控制在阈值两侧反复通断。
+- 目标严格等于零时，FOC ISR 同时清零 Id/Iq PI 状态和 `ud/uq`，避免电流环继续追踪零点采样偏置；遥测中的实测电流仍可能显示 ADC 的小幅零点噪声。
 - 实际限幅为 `[-1200, 1200]` mA。
 
 ## 编码器校准
@@ -155,8 +155,8 @@ Dial 模式由 `MyFile/src/smart_knob.c` 和 `MyFile/src/smart_knob_modes.c` 共
 - `init_smart_knob()` 在首次进入时加载编译期默认预设，后续进入时保留活动预设并重新锚定 detent 中心。
 - `handle_smart_knob()` 以 1 kHz 使用本机 `mechanical_rad` 和 `motor_rps` 更新 detent/endstop 状态机。
 - 触感输出使用 `(P * position_error - D * velocity) * current_scale`，再叠加摩擦补偿和可选双相 click 电流。
-- 电流同时受模式限幅、0–1000 ‰ 安全比例和底层 1.2 A 硬限制约束，最后调用 `MotorDriverSetCurrentReal()`。
-- 低速时慢慢修正 detent 中心；编码器跳变或进入模式后的稳定期输出 0。跳变保护连续取得两个合理样本后会重新同步，不会停留在永久无效状态。
+- 电流同时受模式限幅、0–1000 ‰ 安全比例和底层 1.2 A 硬限制约束，最后调用 SmartKnob 专用的 `MotorDriverSetCurrentRealContinuous()`；其他控制模式仍调用带 60 mA 静音区的 `MotorDriverSetCurrentReal()`。
+- 只有无边界模式会在低速静止后慢慢修正 detent 中心；有边界模式保持固定中心网格。编码器跳变或进入模式后的稳定期输出 0，跳变保护连续取得两个合理样本后会重新同步，不会停留在永久无效状态。
 - 单中心回弹模式从 20 rad/s 开始削弱加速电流、45 rad/s 时完全取消加速电流；全局高速保护在 60 rad/s 进入、40 rad/s 退出。
 - `smart_knob_modes.h` 的 `SMART_KNOB_DEFAULT_MODE` 是唯一的默认预设选择点；各预设配置互相独立。
 - CAN 参数切换模式或修改手感仍在 ControlTask 执行；CommunicationTask 只读取一致快照并主动发送遥测。

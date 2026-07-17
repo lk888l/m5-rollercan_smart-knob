@@ -44,6 +44,8 @@ void MotorDriverSetCurrentAdc(int32_t phase_current);
 
 void MotorDriverSetCurrentReal(float32_t phase_current);
 
+void MotorDriverSetCurrentRealContinuous(float32_t phase_current);
+
 float32_t MotorDriverGetPhaseCurrentAdc(void);
 
 float32_t MotorDriverGetPhaseCurrentReal(void);

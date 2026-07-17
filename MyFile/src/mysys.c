@@ -178,6 +178,8 @@ uint32_t lastest_rgb_color = 0;
 #define OVER_VOLTAGE_RELEASE_CENTIVOLTS 1750.0f
 #define OVER_VOLTAGE_RESTART_DELAY_MS 300U
 #define FAST_LOOP_MIN_START_MARGIN_TIM1_TICKS 640U
+#define FLASH_DEFAULTS_VERSION_INDEX (FLASH_DATA_SIZE - 1U)
+#define FLASH_DEFAULTS_CAN_V1 0xC1U
 
 static volatile uint8_t control_task_active = 0;
 static float control_filter_alpha =
@@ -625,7 +627,16 @@ void InitMysys(void)
   HAL_NVIC_ClearPendingIRQ(TIM1_UP_TIM16_IRQn);
   __HAL_TIM_ENABLE_IT(&htim1, TIM_IT_UPDATE);
   HAL_Delay(300); 
+  /* Seed erased/invalid storage with the CAN default. An old page is migrated
+     in RAM; its marker is persisted by the next explicit configuration save,
+     so boot does not trigger an unsolicited Flash erase. */
+  comm_type = COMM_TYPE_CAN;
+  flash_data[FLASH_DEFAULTS_VERSION_INDEX] = FLASH_DEFAULTS_CAN_V1;
   init_flash_data();
+  if (flash_data[FLASH_DEFAULTS_VERSION_INDEX] != FLASH_DEFAULTS_CAN_V1) {
+    comm_type = COMM_TYPE_CAN;
+    flash_data[FLASH_DEFAULTS_VERSION_INDEX] = FLASH_DEFAULTS_CAN_V1;
+  }
   u8g2Init(&u8g2);  
   if (!HAL_GPIO_ReadPin(SYS_SW_GPIO_Port, SYS_SW_Pin)) {
     /*

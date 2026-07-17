@@ -33,7 +33,6 @@
 #define SMART_KNOB_HAPTIC_RESUME_SPEED_RAD_S 40.0f
 #define SMART_KNOB_PID_LIMIT 10.0f
 #define SMART_KNOB_HARD_CURRENT_LIMIT_A 1.2f
-#define SMART_KNOB_CURRENT_DEADBAND_A 0.09f
 #define SMART_KNOB_CLICK_PHASE_MS 2U
 #define SMART_KNOB_CLICK_TOTAL_MS 4U
 #define SMART_KNOB_TELEMETRY_DEFAULT_RATE_HZ 50U
@@ -397,7 +396,7 @@ void handle_smart_knob(void)
 {
     SmartKnobModeConfig *mode = active_mode_mutable();
     if (mode == NULL) {
-        MotorDriverSetCurrentReal(0.0f);
+        MotorDriverSetCurrentRealContinuous(0.0f);
         return;
     }
     sanitize_mode(mode);
@@ -408,7 +407,7 @@ void handle_smart_knob(void)
     update_high_speed_state(velocity_rad_s);
     if (!sample_valid || (int32_t)(now_ms - enable_after_ms) < 0) {
         last_command_current_ma = 0.0f;
-        MotorDriverSetCurrentReal(0.0f);
+        MotorDriverSetCurrentRealContinuous(0.0f);
         publish_runtime_state(velocity_rad_s);
         return;
     }
@@ -417,7 +416,11 @@ void handle_smart_knob(void)
     SmartKnobTuning *tuning = &mode->tuning;
     const int32_t num_positions = position_count(config);
 
-    if (num_positions != 1) {
+    /* Idle correction compensates slow sensor/mechanical drift for an
+       unbounded knob. A bounded mode owns an absolute detent lattice; moving
+       that lattice toward a hand-held offset turns a static spring into a
+       slow state machine and can create a relaxation oscillation. */
+    if (num_positions <= 0) {
         idle_velocity_ewma = fabsf(velocity_rad_s) * idle_velocity_alpha +
                              idle_velocity_ewma * (1.0f - idle_velocity_alpha);
         if (idle_velocity_ewma > SMART_KNOB_IDLE_VELOCITY_RAD_S) {
@@ -480,12 +483,22 @@ void handle_smart_knob(void)
                              -SMART_KNOB_PID_LIMIT,
                              SMART_KNOB_PID_LIMIT);
     float requested_current_a = tuning->current_scale_a * pid;
-    requested_current_a += friction_current(velocity_rad_s,
-                                            tuning->friction_current_a);
-    requested_current_a += click_current(tuning,
-                                         !out_of_bounds &&
-                                             config->detent_positions_count == 0U,
-                                         now_ms);
+    const float friction_request_a = friction_current(velocity_rad_s,
+                                                      tuning->friction_current_a);
+    const float click_request_a = click_current(
+        tuning,
+        !out_of_bounds && config->detent_positions_count == 0U,
+        now_ms);
+    requested_current_a += friction_request_a + click_request_a;
+
+    /* Quantized encoder speed can leave a tiny D request while the shaft is
+       physically stationary. Quiet the electrical loop from control intent:
+       geometric center + idle speed + no click, never from current magnitude. */
+    if (input == 0.0f &&
+        fabsf(velocity_rad_s) <= SMART_KNOB_IDLE_VELOCITY_RAD_S &&
+        click_request_a == 0.0f) {
+        requested_current_a = 0.0f;
+    }
 
     const float safety_limit_a = SMART_KNOB_HARD_CURRENT_LIMIT_A *
                                  tuning->max_current_permille / 1000.0f;
@@ -502,12 +515,8 @@ void handle_smart_knob(void)
                                                               velocity_rad_s);
         }
     }
-    if (fabsf(requested_current_a) <= SMART_KNOB_CURRENT_DEADBAND_A) {
-        requested_current_a = 0.0f;
-    }
-
     last_command_current_ma = requested_current_a * 1000.0f;
-    MotorDriverSetCurrentReal(last_command_current_ma);
+    MotorDriverSetCurrentRealContinuous(last_command_current_ma);
     publish_runtime_state(velocity_rad_s);
 }
 
