@@ -5,7 +5,7 @@
 职责：
 
 - 应用入口。
-- SRAM 向量表重映射。
+- 通过 `SCB->VTOR` 选择 `0x08002000` 的完整应用向量表。
 - Flash 配置初始化/写回。
 - I2C 从机寄存器协议分发。
 - 系统时钟配置。
@@ -14,7 +14,7 @@
 
 | 函数 | 运行方式 |
 | --- | --- |
-| `IAP_Set()` | `main()` 最早调用，复制应用向量表到 SRAM 并 remap |
+| `IAP_Set()` | `main()` 最早调用，将 `SCB->VTOR` 指向完整应用向量表 |
 | `micros()` | 基于 SysTick 和 HAL tick 生成微秒时间，PID/SmartKnob 使用 |
 | `init_flash_data()` | 启动时读取 Flash 或写入默认配置 |
 | `flash_data_write_back()` | 保存当前配置到 Flash |
@@ -27,19 +27,21 @@
 
 - 系统状态中心。
 - PID 参数、目标值、保护状态、通信状态的全局定义。
-- 业务初始化、主循环和 TIM1 实时调度。
+- 业务初始化、ControlTask 控制步和 TIM1 FOC 快环。
 
 关键函数：
 
 | 函数 | 运行方式 |
 | --- | --- |
 | `InitMysys()` | 上电初始化 ADC、PWM、电机、编码器、Flash、OLED、通信 |
-| `LoopMysys()` | 主循环慢速任务 |
-| `Loop_FOC()` | TIM1 中断分频调用，运行 FOC 和 ADC 处理 |
-| `Loop_Control()` | TIM1 中断分频调用，计算机械状态和保护 |
-| `speed_pid()` | 速度模式外环，输出电流目标 |
-| `pos_pid()` | 位置模式外环，输出电流目标 |
-| `mysys_tim1_update_handler()` | TIM1 更新中断 helper |
+| `LoopMysysOnce()` | MaintenanceTask 调用的慢速单步函数 |
+| `MysysStorageOnce()` | StorageTask 调用的安全写回单步函数 |
+| `Loop_FOC()` | 约 18.67 kHz DMA2 RX 完成 ISR 调用，运行 FOC 和 ADC 处理 |
+| `Loop_Control()` | 1 kHz ControlTask 调用，计算机械状态和保护 |
+| `MysysControlStep()` | 1 kHz 外环、模式状态机和 SmartKnob 入口 |
+| `MysysFastLoopISR()` | TIM1 update ISR helper，启动编码器 DMA |
+| `MysysFastLoopOnEncoderSampleFromISR()` | DMA2 完成后提交同周期样本并接续 FOC |
+| `speed_pid()` / `pos_pid()` | ControlTask 中的速度/位置外环，输出电流目标 |
 | `crc8_MAXIM()` | 旧串口协议遗留 CRC helper |
 
 ## `MyFile/src/motordriver.c`
@@ -81,13 +83,15 @@
 
 职责：
 
-- 使用 SPI1 读取 TLE5012B 编码器。
+- 使用 SPI1 + DMA2 两字 normal 传输读取 TLE5012B 编码器。
 - 通过 PA4 软件控制 CS。
+- 处理 RX 完成、TX/RX 错误、超时和陈旧样本诊断。
 
 运行：
 
 - `EncoderInit()` 在 `InitMysys()` 中调用。
-- `EncoderGetAngle()` 被 `MotorDriverProcess()` 高频调用。
+- `EncoderStartDmaReadFromISR()` 被 TIM1 update ISR 高频调用。
+- `EncoderGetLatestAngle()` 在 DMA 完成后由 `MotorDriverProcess()` 读取，不发起 SPI 事务。
 
 ## `MyFile/src/encoder.c`
 
@@ -169,8 +173,10 @@
 运行：
 
 - `user_fdcan_init()` 按 `can_id` 和 `bps_index` 设置 filter 和波特率。
-- `HAL_FDCAN_RxFifo0Callback()` 在 CAN RX FIFO0 中断回调中解析命令。
-- 对本机控制直接改 `mysys.c` 全局状态，对保存/换 ID/换波特率使用主循环延迟处理。
+- `HAL_FDCAN_RxFifo0Callback()` 只通知 CommunicationTask 并记录 FIFO loss。
+- CommunicationTask 调用 `FDCAN_ReadPendingCommand()`，将本机命令排队给 ControlTask；命令 `19–22` 的桥接操作留在 CommunicationTask。
+- ControlTask 调用 `FDCAN_ProcessCommand()` 修改本机状态，并将回复排队回 CommunicationTask。
+- CAN ID/波特率重配置由 CommunicationTask 执行，Flash 保存由 StorageTask 延后完成。
 
 ## `Core/Src/flash.c`
 
@@ -272,8 +278,8 @@
 
 职责：
 
-- DMA1 和 DMAMUX 时钟。
-- ADC DMA 和 TIM3 DMA 中断优先级。
+- DMA1、DMA2 和 DMAMUX 时钟。
+- ADC DMA、TIM3 DMA 以及 SPI1 RX/TX DMA 通道和中断优先级。
 
 ## `Core/Src/stm32g4xx_it.c`
 
@@ -284,7 +290,7 @@
 维护重点：
 
 - 公开 IRQ 函数名应只在这个文件中定义。
-- 业务逻辑通过 helper 进入，例如 `mysys_tim1_update_handler()`、`i2c1_event_irq_handler()`。
+- 业务逻辑通过 helper 进入，例如 `MysysFastLoopISR()`、`i2c1_event_irq_handler()`。
 
 ## `U8g2_lib`
 

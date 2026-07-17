@@ -31,7 +31,7 @@ Flash 读写在 `Core/Src/flash.c`：
 
 ## Flash 数据布局
 
-`FLASH_DATA_SIZE = 48`，当前使用 0-36 字节。
+`FLASH_DATA_SIZE = 48`，当前使用 0-36 和 47 字节。
 
 | Byte | 内容 | 说明 |
 | --- | --- | --- |
@@ -53,7 +53,10 @@ Flash 读写在 `Core/Src/flash.c`：
 | 34 | rgb_show_mode | 系统默认/用户自定义 |
 | 35 | motor_stall_protection_flag | 堵转保护开关 |
 | 36 | motor_overvalue_protection_flag | 位置越界保护开关 |
-| 37-47 | 保留 | 当前未使用 |
+| 37-46 | 保留 | 当前未使用 |
+| 47 | defaults version | `0xC1` 表示已应用 CAN 默认值迁移 |
+
+没有该版本标记的旧配置会在启动时先把 RAM 中的 `comm_type` 迁移为 CAN，但不会仅为迁移主动擦写 Flash；版本标记随下一次菜单或协议配置保存一并写回。写入标记后，后续显式保存的 I2C/CAN/CAN-I2C 选择不会再被默认值覆盖。
 
 ## 写回触发
 
@@ -68,10 +71,10 @@ Flash 读写在 `Core/Src/flash.c`：
 | I2C | 写 `0xF2 = 1` 保存编码器 offset |
 | CAN | `cmd_id=10` 设置 `flash_data_write_back_flag` |
 | CAN | `FUNC_SAVE_FLASH` 写非 0 |
-| CAN | 修改 CAN ID 后主循环检测 `can_change_flag` |
+| CAN | CommunicationTask 完成 CAN ID/波特率重配置后设置延后写回标志 |
 | OLED 菜单 | 确认 COM、I2C ADDR、CAN ID、PID 组、BPS、RGB、JAM、RANGE 等设置 |
 
-主循环会检测 `flash_data_write_back_flag`，这样 CAN 中断里不直接擦写 Flash。
+StorageTask 会检测 `flash_data_write_back_flag`，并在电机不处于 `SYS_RUNNING` 时写入，因此 CAN/CommunicationTask 不直接擦写 Flash。
 
 ## 写入注意事项
 

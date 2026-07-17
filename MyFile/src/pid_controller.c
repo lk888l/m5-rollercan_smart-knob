@@ -61,6 +61,7 @@ void PIDInit(PIDControl *pid, float kp, float ki, float kd,
     pid->lastInput = 0.0f;
     pid->output = 0.0f;
     pid->setpoint = 0.0f;
+    pid->discreteTimeScale = 1.0f;
     
     if(sampleTimeSeconds > 0.0f)
     {
@@ -182,8 +183,8 @@ PIDTuningsSet(PIDControl *pid, float kp, float ki, float kd)
     
     // Alter the parameters for PID
     pid->alteredKp = kp;
-    pid->alteredKi = ki;
-    pid->alteredKd = kd;
+    pid->alteredKi = ki * pid->discreteTimeScale;
+    pid->alteredKd = kd / pid->discreteTimeScale;
     
     // Apply reverse direction to the altered values if necessary
     if(pid->controllerDirection == REVERSE)
@@ -228,7 +229,7 @@ PIDControllerDirectionSet(PIDControl *pid, PIDDirection controllerDirection)
 }
 
 void 
-PIDSampleTimeSet(PIDControl *pid, float sampleTimeSeconds)                                                       									  									  									   
+PIDSampleTimeSet(PIDControl *pid, float sampleTimeSeconds)                                                       									  									   
 {
     float ratio;
 
@@ -242,6 +243,16 @@ PIDSampleTimeSet(PIDControl *pid, float sampleTimeSeconds)
         // Save the new sampling time
         pid->sampleTime = sampleTimeSeconds;
     }
+}
+
+void PIDDiscreteTimeScaleSet(PIDControl *pid, float scale)
+{
+    if (scale <= 0.0f) {
+        return;
+    }
+
+    pid->discreteTimeScale = scale;
+    PIDTuningsSet(pid, pid->dispKp, pid->dispKi, pid->dispKd);
 }
 
 

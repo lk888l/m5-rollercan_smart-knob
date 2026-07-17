@@ -4,10 +4,10 @@
 
 CubeMX 可能重新生成 `Core/Src/stm32g4xx_it.c`、外设初始化文件和 `cmake/stm32cubemx/CMakeLists.txt`。再生成后重点检查：
 
-- `TIM1_UP_TIM16_IRQHandler()` 是否仍在 USER CODE 区调用 `mysys_tim1_update_handler()`。
+- `TIM1_UP_TIM16_IRQHandler()` 是否仍在 USER CODE 区调用 `MysysFastLoopISR()`，且没有再次调用 `HAL_TIM_IRQHandler()`。
 - `I2C1_EV_IRQHandler()` 是否仍调用 `i2c1_event_irq_handler()`。
 - `I2C1_ER_IRQHandler()` 是否仍调用 `i2c1_error_irq_handler()`。
-- 根 `CMakeLists.txt` 是否仍手动加入 `Core/Src/flash.c`、`Core/Src/i2c_ex.c`、`MyFile/src/*.c` 和裁剪后的 U8g2 源。
+- 根 `CMakeLists.txt` 是否仍加入 `App/src/app_rtos.cpp`、FreeRTOS kernel/port、`Core/Src/flash.c`、`Core/Src/i2c_ex.c`、`MyFile/src/*.c` 和裁剪后的 U8g2 源。
 
 公开 IRQ 入口函数不要复制到 `MyFile` 或其他源文件中，否则链接时会出现重复定义。正确做法是：
 
@@ -37,14 +37,14 @@ arm-none-eabi-nm --print-size --size-sort --radix=d build\Debug\ROLLERCAN.elf
 
 ## 实时上下文约束
 
-TIM1 更新中断里会运行 FOC 和控制逻辑，注意：
+TIM1 update ISR 只启动编码器 DMA；DMA2 RX 完成 ISR 提交角度并接续 FOC。1 kHz 外环、保护和 SmartKnob 正常运行时由 ControlTask 负责。注意：
 
-- 不要在 TIM1 中断路径里做 Flash 擦写。
+- 不要在 TIM1/DMA2 快环路径里做 Flash 擦写。
 - 不要做长时间阻塞 I2C/CAN 操作。
-- OLED 绘制和 WS2812 发送应留在主循环。
+- OLED 绘制和 WS2812 发送应留在 MaintenanceTask。
 - 增加滤波或计算时要考虑 FOC 频率和中断耗时。
 
-CAN callback 当前会直接执行一些 I2C 桥接读写。若后续遇到实时性问题，可以考虑改为主循环任务队列。
+FDCAN callback 只通知 CommunicationTask；帧读取、回复发送和 CAN-I2C 桥接都在该任务中执行。I2C1 从机回调仍是尚未完全任务化的例外，其 IRQ 优先级必须低于 TIM1/DMA2 快环。
 
 ## 单位和缩放
 

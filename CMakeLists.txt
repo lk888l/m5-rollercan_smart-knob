@@ -11,12 +11,15 @@ cmake_minimum_required(VERSION 3.22)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 
 # Define the build type
 if(NOT CMAKE_BUILD_TYPE)
-    # TIM1 runs the FOC and SmartKnob feedback path; an unoptimised build is
-    # not suitable for a flashed firmware image.
+    # TIM1 triggers the DMA-backed fast FOC path; SmartKnob feedback runs in
+    # ControlTask. An unoptimised build is not suitable for a flashed image.
     set(CMAKE_BUILD_TYPE "Release")
 endif()
 
@@ -30,8 +33,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 project(${CMAKE_PROJECT_NAME})
 message("Build type: " ${CMAKE_BUILD_TYPE})
 
-# Enable CMake support for ASM and C languages
-enable_language(C ASM)
+# Enable CMake support for ASM, C and C++ languages
+enable_language(C CXX ASM)
 
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
@@ -76,6 +79,13 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Additional user sources (not managed by CubeMX)
     Core/Src/flash.c
     Core/Src/i2c_ex.c
+    App/src/app_rtos.cpp
+    App/src/fast_control_link.cpp
+    App/src/runtime_metrics.cpp
+    Middlewares/Third_Party/FreeRTOS/Source/list.c
+    Middlewares/Third_Party/FreeRTOS/Source/queue.c
+    Middlewares/Third_Party/FreeRTOS/Source/tasks.c
+    Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F/port.c
 )
 
 # Add include paths
@@ -85,11 +95,18 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # User libraries
     MyFile/inc
     U8g2_lib
+    App/inc
+    Middlewares/Third_Party/FreeRTOS/Source/include
+    Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F
 )
 
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined symbols
+    ROLLERCAN_USE_FREERTOS=1
+)
+
+target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions;-fno-rtti;-fno-threadsafe-statics>
 )
 
 # Remove wrong libob.a library dependency when using cpp files

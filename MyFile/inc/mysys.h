@@ -8,6 +8,10 @@
 #include "stm32g4xx.h"
 #include "pid_controller.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define RGB_BUFFER_SIZE 10
 
 enum {SYS_STANDBY = 0, SYS_RUNNING, SYS_ERROR};
@@ -93,6 +97,20 @@ extern uint8_t motor_overvalue_protection_flag;
 
 void InitMysys(void);
 void LoopMysys(void);
+void LoopMysysOnce(void);
+void MysysStorageOnce(void);
+void MysysControlTaskBegin(void);
+void MysysControlStep(void);
+void MysysCycleMode(void);
+void MysysFastLoopISR(void);
+void MysysFastLoopOnEncoderSampleFromISR(uint8_t fresh_sample,
+                                         uint32_t irq_start_cycles);
+extern volatile uint32_t fast_loop_late_start_count;
+extern volatile uint32_t fast_loop_sync_timeout_count;
 uint8_t crc8_MAXIM(uint8_t *data, uint8_t len);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

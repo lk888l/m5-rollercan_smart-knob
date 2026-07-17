@@ -28,13 +28,13 @@
 #include "myadc.h"
 #include "i2c.h"
 #include "ws2812.h"
+#include "app_rtos.h"
 
-FDCAN_TxHeaderTypeDef fdcan1_TxHeader;
 uint8_t can_id = 168;
-uint8_t can_change_flag = 0;
-uint8_t flash_data_write_back_flag = 0;
-uint8_t change_baudrate_flag = 0;
-uint32_t change_baudrate_delay = 0;
+volatile uint8_t can_change_flag = 0;
+volatile uint8_t flash_data_write_back_flag = 0;
+volatile uint8_t change_baudrate_flag = 0;
+volatile uint32_t change_baudrate_delay = 0;
 /* USER CODE END 0 */
 
 FDCAN_HandleTypeDef hfdcan1;
@@ -89,7 +89,9 @@ void MX_FDCAN1_Init(void)
   HAL_FDCAN_ConfigGlobalFilter(&hfdcan1, FDCAN_REJECT, FDCAN_REJECT, ENABLE, ENABLE);
 
   /* 注册 FDCAN 接收中断回调函数 */
-  if (HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) != HAL_OK)
+  if (HAL_FDCAN_ActivateNotification(&hfdcan1,
+                                     FDCAN_IT_RX_FIFO0_NEW_MESSAGE |
+                                     FDCAN_IT_RX_FIFO0_MESSAGE_LOST, 0) != HAL_OK)
   {
     Error_Handler();
   }    
@@ -138,7 +140,9 @@ void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* fdcanHandle)
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
     /* FDCAN1 interrupt Init */
-    HAL_NVIC_SetPriority(FDCAN1_IT0_IRQn, 1, 0);
+    /* This ISR notifies a FreeRTOS task, so it must be at or below the
+       configured maximum syscall interrupt priority. */
+    HAL_NVIC_SetPriority(FDCAN1_IT0_IRQn, 6, 0);
     HAL_NVIC_EnableIRQ(FDCAN1_IT0_IRQn);
   /* USER CODE BEGIN FDCAN1_MspInit 1 */
 
@@ -222,7 +226,9 @@ void user_fdcan_init(void)
   HAL_FDCAN_ConfigGlobalFilter(&hfdcan1, FDCAN_REJECT, FDCAN_REJECT, ENABLE, ENABLE);
 
   /* 注册 FDCAN 接收中断回调函数 */
-  if (HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) != HAL_OK)
+  if (HAL_FDCAN_ActivateNotification(&hfdcan1,
+                                     FDCAN_IT_RX_FIFO0_NEW_MESSAGE |
+                                     FDCAN_IT_RX_FIFO0_MESSAGE_LOST, 0) != HAL_OK)
   {
     Error_Handler();
   }    
@@ -290,51 +296,155 @@ void feedback_function_read(uint8_t *data, uint16_t index, int32_t tx_data)
 
 uint8_t FDCAN1_Send_Msg(uint8_t cmd_id, uint16_t option, uint8_t can_id, uint8_t* msg)
 {	
-    fdcan1_TxHeader.Identifier = ((cmd_id << 24) | (option << 8) | can_id);
-    fdcan1_TxHeader.IdType=FDCAN_EXTENDED_ID;                  //标准ID
-    fdcan1_TxHeader.TxFrameType=FDCAN_DATA_FRAME;              //数据
-    fdcan1_TxHeader.DataLength=FDCAN_DLC_BYTES_8;                            //数据长度
-    fdcan1_TxHeader.ErrorStateIndicator=FDCAN_ESI_PASSIVE;            
-    fdcan1_TxHeader.BitRateSwitch=FDCAN_BRS_OFF;               //关闭速率切换
-    fdcan1_TxHeader.FDFormat=FDCAN_CLASSIC_CAN;                //传统的CAN模式
-    fdcan1_TxHeader.TxEventFifoControl=FDCAN_NO_TX_EVENTS;     //无发送事
-    fdcan1_TxHeader.MessageMarker=0;       
+    FDCAN_TxHeaderTypeDef tx_header = {0};
+    tx_header.Identifier = ((cmd_id << 24) | (option << 8) | can_id);
+    tx_header.IdType=FDCAN_EXTENDED_ID;                  //标准ID
+    tx_header.TxFrameType=FDCAN_DATA_FRAME;              //数据
+    tx_header.DataLength=FDCAN_DLC_BYTES_8;                            //数据长度
+    tx_header.ErrorStateIndicator=FDCAN_ESI_PASSIVE;
+    tx_header.BitRateSwitch=FDCAN_BRS_OFF;               //关闭速率切换
+    tx_header.FDFormat=FDCAN_CLASSIC_CAN;                //传统的CAN模式
+    tx_header.TxEventFifoControl=FDCAN_NO_TX_EVENTS;     //无发送事
+    tx_header.MessageMarker=0;
 
-    if(HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1,&fdcan1_TxHeader,msg)!=HAL_OK) return 1;
+    if(HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1,&tx_header,msg)!=HAL_OK) return 1;
 
     return 0;                    	
 }
 
-/* FDCAN 接收中断回调函数 */
-void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
+bool FDCAN_ReadPendingCommand(CanProtocolCommand *command)
 {
-  if((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != RESET)
-  {
-    FDCAN_RxHeaderTypeDef rx_header;
-    uint8_t rx_data[8];    
-		uint16_t my_tx_option;
-    uint8_t motor_mode_temp;
-    int32_t int_value_temp;
-    uint8_t i2c_address, i2c_len, i2c_success, is_stop_bit;
+  FDCAN_RxHeaderTypeDef rx_header;
 
-    comm_flash_count = 4;
+  if (command == NULL) {
+    return false;
+  }
+  if (HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0,
+                             &rx_header, command->data) != HAL_OK) {
+    return false;
+  }
 
-    /* 从 FIFO0 读取消息 */
-    if (HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &rx_header, rx_data) == HAL_OK)
-    {
-      uint8_t cmd_id = identifier_to_cmd(rx_header.Identifier);
-      uint8_t cmd_para = identifier_to_cmd_para(rx_header.Identifier);
-      uint8_t option = identifier_to_option(rx_header.Identifier);
-			uint8_t data[8] = {0};
-			uint16_t func_index = 0;
-			uint16_t i2c_address = 0;
+  command->command_id = identifier_to_cmd(rx_header.Identifier);
+  command->command_parameter = identifier_to_cmd_para(rx_header.Identifier);
+  command->option = identifier_to_option(rx_header.Identifier);
+  return true;
+}
+
+bool FDCAN_IsBridgeCommand(const CanProtocolCommand *command)
+{
+  return command != NULL && command->command_id >= 19U &&
+         command->command_id <= 22U;
+}
+
+static void FDCAN_SetResponse(CanProtocolResponse *response,
+                              uint8_t command_id,
+                              uint16_t option,
+                              uint8_t destination_id,
+                              const uint8_t data[8])
+{
+  if (response == NULL) {
+    return;
+  }
+
+  response->command_id = command_id;
+  response->option = option;
+  response->destination_id = destination_id;
+  memcpy(response->data, data, 8);
+  response->valid = true;
+}
+
+uint8_t FDCAN_SendResponse(const CanProtocolResponse *response)
+{
+  if (response == NULL || !response->valid) {
+    return 1U;
+  }
+  return FDCAN1_Send_Msg(response->command_id, response->option,
+                         response->destination_id, (uint8_t *)response->data);
+}
+
+bool FDCAN_SmartKnobTelemetryActive(void)
+{
+  return (comm_type == COMM_TYPE_CAN || comm_type == COMM_TYPE_CAN_I2C) &&
+         smart_knob_telemetry_enabled();
+}
+
+uint8_t FDCAN_ServiceSmartKnobTelemetry(void)
+{
+  SmartKnobTelemetryFrame frame;
+  uint8_t drop_count = 0U;
+
+  if (!FDCAN_SmartKnobTelemetryActive()) {
+    return 0U;
+  }
+
+  /* One logical state frame and one motion/current frame form a sample. */
+  for (uint8_t frame_index = 0U; frame_index < 2U; ++frame_index) {
+    if (!smart_knob_build_telemetry(HAL_GetTick(), &frame)) {
+      break;
+    }
+    const uint8_t command_id = SMART_KNOB_TELEMETRY_COMMAND_ID + frame.type - 1U;
+    const uint16_t tx_option = ((uint16_t)frame.sequence << 8) | can_id;
+    if (FDCAN1_Send_Msg(command_id, tx_option,
+                        frame.destination_id, frame.data) != 0U) {
+      ++drop_count;
+    }
+  }
+  return drop_count;
+}
+
+void FDCAN_ServiceReconfiguration(void)
+{
+  bool reconfigure = false;
+
+  if (can_change_flag) {
+    can_change_flag = 0U;
+    reconfigure = true;
+  }
+  if (change_baudrate_flag &&
+      (HAL_GetTick() - change_baudrate_delay >= 300U)) {
+    change_baudrate_flag = 0U;
+    reconfigure = true;
+  }
+
+  if (reconfigure) {
+    HAL_FDCAN_DeInit(&hfdcan1);
+    user_fdcan_init();
+    flash_data_write_back_flag = 1U;
+  }
+}
+
+bool FDCAN_ProcessCommand(const CanProtocolCommand *command,
+                          CanProtocolResponse *response)
+{
+      uint16_t my_tx_option;
+      uint8_t motor_mode_temp;
+      int32_t int_value_temp;
+      uint8_t i2c_len, i2c_success, is_stop_bit;
+      uint8_t rx_data[8];
+      uint8_t cmd_id;
+      uint8_t cmd_para;
+      uint8_t option;
+      uint8_t data[8] = {0};
+      uint16_t func_index = 0;
+      uint16_t i2c_address = 0;
       uint32_t i2c_data = 0;
-			int32_t func_data = 0;
+      int32_t func_data = 0;
+
+      if (command == NULL || response == NULL) {
+        return false;
+      }
+
+      response->valid = false;
+      cmd_id = command->command_id;
+      cmd_para = command->command_parameter;
+      option = (uint8_t)command->option;
+      memcpy(rx_data, command->data, sizeof(rx_data));
+      comm_flash_count = 4;
 
       switch (cmd_id)
       {
       case 0:
-        FDCAN1_Send_Msg(cmd_id, can_id, 0xFE, data);
+        FDCAN_SetResponse(response, cmd_id, can_id, 0xFE, data);
         break;
       case 3:
         motor_output = 1;
@@ -353,7 +463,7 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
         }      
         my_tx_option = feedback_option_data(can_id, data);
 
-        FDCAN1_Send_Msg(2, my_tx_option, option, data);
+        FDCAN_SetResponse(response, 2, my_tx_option, option, data);
         break;
       case 4:
         motor_output = 0;
@@ -369,13 +479,13 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
         }      
         my_tx_option = feedback_option_data(can_id, data);
 
-        FDCAN1_Send_Msg(2, my_tx_option, option, data);
+        FDCAN_SetResponse(response, 2, my_tx_option, option, data);
         break;
       case 7:
         can_id = cmd_para;
         can_change_flag = 1;
 
-        FDCAN1_Send_Msg(0, can_id, 0xFE, data);
+        FDCAN_SetResponse(response, 0, can_id, 0xFE, data);
         break;
       // case 8:
       //   if (over_vol_flag)
@@ -405,13 +515,13 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
         err_stalled_flag = 0;
         my_tx_option = feedback_option_data(can_id, data);
 
-        FDCAN1_Send_Msg(2, my_tx_option, option, data);
+        FDCAN_SetResponse(response, 2, my_tx_option, option, data);
         break;
       case 10:
         flash_data_write_back_flag = 1;
         my_tx_option = feedback_option_data(can_id, data);
 
-        FDCAN1_Send_Msg(2, my_tx_option, option, data);
+        FDCAN_SetResponse(response, 2, my_tx_option, option, data);
         break;
       case 11:
         if (cmd_para <= 2) {
@@ -420,31 +530,31 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
           bps_index = cmd_para;
         }         
         my_tx_option = (option | (bps_index << 8));
-        FDCAN1_Send_Msg(cmd_id, my_tx_option, can_id, data);
+        FDCAN_SetResponse(response, cmd_id, my_tx_option, can_id, data);
         break;
       case 12:
         motor_stall_protection_flag = 1;
         my_tx_option = feedback_option_data(can_id, data);
 
-        FDCAN1_Send_Msg(2, my_tx_option, option, data);
+        FDCAN_SetResponse(response, 2, my_tx_option, option, data);
         break;
       case 13:
         motor_stall_protection_flag = 0;
         my_tx_option = feedback_option_data(can_id, data);
 
-        FDCAN1_Send_Msg(2, my_tx_option, option, data);
+        FDCAN_SetResponse(response, 2, my_tx_option, option, data);
         break;
       case 14:
         motor_overvalue_protection_flag = 1;
         my_tx_option = feedback_option_data(can_id, data);
 
-        FDCAN1_Send_Msg(2, my_tx_option, option, data);
+        FDCAN_SetResponse(response, 2, my_tx_option, option, data);
         break;
       case 15:
         motor_overvalue_protection_flag = 0;
         my_tx_option = feedback_option_data(can_id, data);
 
-        FDCAN1_Send_Msg(2, my_tx_option, option, data);
+        FDCAN_SetResponse(response, 2, my_tx_option, option, data);
         break;
       case 17:
         memcpy(&func_index, &rx_data[0], 2);
@@ -630,11 +740,17 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
         case FUNC_RGB_BRIGHTNESS:
             feedback_function_read(data, func_index, brightness_index);
           break;                   
+        case FUNC_OVERVOLTAGE_PROTECTION_RELEASE_MODE:
+            feedback_function_read(data, func_index, over_vol_protect_mode);
+          break;
         
         default:
+          if (smart_knob_read_parameter(func_index, &int_value_temp)) {
+            feedback_function_read(data, func_index, int_value_temp);
+          }
           break;
         }
-        FDCAN1_Send_Msg(cmd_id, option, can_id, data);
+        FDCAN_SetResponse(response, cmd_id, option, can_id, data);
         break;
       case 18:
         memcpy(&func_index, &rx_data[0], 2);
@@ -684,6 +800,12 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
             MotorDriverSetMode(MDRV_MODE_OFF);
           }
 
+          break;
+        case FUNC_OVERVOLTAGE_PROTECTION_RELEASE_MODE:
+          over_vol_protect_mode = abs(func_data) != 0;
+          if (!over_vol_protect_mode) {
+            over_vol_protect_auto_flag = 0U;
+          }
           break;
         case FUNC_RUN_MODE:
           if (func_data && func_data < MODE_MAX && !err_stalled_flag) {
@@ -821,10 +943,11 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
           break;        
         
         default:
+          (void)smart_knob_write_parameter(func_index, func_data, option);
           break;
         }
         my_tx_option = feedback_option_data(can_id, data);
-        FDCAN1_Send_Msg(2, my_tx_option, option, data);
+        FDCAN_SetResponse(response, 2, my_tx_option, option, data);
         break;
       case 19:
         LL_I2C_Disable(I2C1);
@@ -948,7 +1071,7 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
         default:
           break;
         }
-        FDCAN1_Send_Msg(cmd_id, option, can_id, data);
+        FDCAN_SetResponse(response, cmd_id, option, can_id, data);
         break;        
       case 20:
         LL_I2C_Disable(I2C1);
@@ -1027,7 +1150,7 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
           break;
         }
         my_tx_option = feedback_option_data(can_id, data);
-        FDCAN1_Send_Msg(2, my_tx_option, option, data);
+        FDCAN_SetResponse(response, 2, my_tx_option, option, data);
         break;
       case 21:
         LL_I2C_Disable(I2C1);
@@ -1040,7 +1163,7 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
         i2c_success = I2C1_ReceiveData(i2c_address, data, i2c_len, 10);
         i2c_success = !i2c_success;
         my_tx_option = (option | (i2c_success << 8));
-        FDCAN1_Send_Msg(cmd_id, my_tx_option, can_id, data);
+        FDCAN_SetResponse(response, cmd_id, my_tx_option, can_id, data);
         break;
       case 22:
         LL_I2C_Disable(I2C1);
@@ -1057,15 +1180,39 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
           i2c_success = I2C1_TransmitData_RepeatedStart(i2c_address, &rx_data[1], i2c_len, 10);
         i2c_success = !i2c_success;
         my_tx_option = (option | (i2c_success << 8));
-        FDCAN1_Send_Msg(cmd_id, my_tx_option, can_id, data);
+        FDCAN_SetResponse(response, cmd_id, my_tx_option, can_id, data);
         break;
       
       default:
         break;
       }
-    }
+      return response->valid;
+}
 
-    /* 在这里处理接收到的消息，可以根据 rx_header 中的信息来进行区分和处理 */
+void FDCAN_ProcessPending(void)
+{
+  CanProtocolCommand command;
+  CanProtocolResponse response;
+
+  if (FDCAN_ReadPendingCommand(&command) &&
+      FDCAN_ProcessCommand(&command, &response) && response.valid) {
+    FDCAN_SendResponse(&response);
+  }
+}
+
+void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
+{
+  (void)hfdcan;
+  if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_MESSAGE_LOST) != RESET) {
+    ++app_can_hw_fifo_loss_count;
+  }
+  if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) == RESET) {
+    return;
+  }
+
+  if (!App_NotifyCanRxFromISR()) {
+    /* Startup fallback before the scheduler is running. */
+    FDCAN_ProcessPending();
   }
 }
 /* USER CODE END 1 */

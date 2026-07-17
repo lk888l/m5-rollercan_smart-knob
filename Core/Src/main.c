@@ -37,6 +37,7 @@
 #include "u8g2_disp_fun.h"
 #include "myadc.h"
 #include "smart_knob.h"
+#include "app_rtos.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -77,26 +78,15 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-void IAP_Set()
+void IAP_Set(void)
 {
-	uint8_t i;
- 
-	uint32_t *pVecTab=(uint32_t *)(0x20000000);
-
-	for(i = 0; i < 48; i++)
-	{
-		*(pVecTab++) = *(__IO uint32_t*)(APPLICATION_ADDRESS + (i<<2));
-	}
-  /* Enable the SYSCFG peripheral clock*/
-#if 1 //STM32
-  __HAL_RCC_SYSCFG_CLK_ENABLE();
-
-  __HAL_SYSCFG_REMAPMEMORY_SRAM();
-#else //AMP32
-    RCM_EnableAPB2PeriphClock(RCM_APB2_PERIPH_SYSCFG);
-    /* Remap SRAM at 0x00000000 */
-    SYSCFG->CFG1_B.MMSEL = SYSCFG_MemoryRemap_SRAM;
-#endif
+  /* The STM32G431 vector table contains more than the 48 entries copied by
+     the legacy SRAM-remap implementation. DMA2 Channel 1/2 use IRQ 56/57,
+     so their vectors were read from normal SRAM data and faulted on the first
+     encoder DMA completion. Point VTOR at the complete application table. */
+  SCB->VTOR = APPLICATION_ADDRESS;
+  __DSB();
+  __ISB();
 }
 
 __STATIC_INLINE uint32_t GXT_SYSTICK_IsActiveCounterFlag(void)
@@ -213,7 +203,8 @@ void init_flash_data(void)
   }
   else if (motor_mode == MODE_POS_ERR_PROTECT) {
     motor_mode = MODE_POS;
-  }  
+  }
+  last_motor_mode = motor_mode;
 }
 
 void flash_data_write_back(void)
@@ -278,7 +269,6 @@ void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
 
 void Slave_Complete_Callback(uint8_t *rx_data, uint16_t len)
 {
-  uint8_t buf[4];
   uint8_t rx_buf[16];
   uint8_t tx_buf[16];
   uint8_t rx_mark[16] = {0};  
@@ -740,6 +730,8 @@ void Slave_Complete_Callback(uint8_t *rx_data, uint16_t len)
     else if (rx_data[0] == 0xFD)
     {
       if (rx_data[1] == 1) {
+        HAL_NVIC_DisableIRQ(DMA2_Channel1_IRQn);
+        HAL_NVIC_DisableIRQ(DMA2_Channel2_IRQn);
         LL_I2C_DeInit(I2C1);
         LL_I2C_DisableAutoEndMode(I2C1);
         LL_I2C_Disable(I2C1);
@@ -915,13 +907,13 @@ int main(void)
   /* USER CODE BEGIN 2 */
 	InitMysys();
   sk6812_init(PIXEL_MAX); 	
+  App_StartScheduler();
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-		LoopMysys();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

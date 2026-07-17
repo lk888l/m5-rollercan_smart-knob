@@ -18,14 +18,15 @@
 
 #include "u8g2_disp_fun.h"
 #include "ws2812.h"
+#include "fast_control_link.h"
 
 #define     LIMIT_UDC       24.0f
 #define     SQRT3           1.732050808f
 #define     TS              1000
 #define     SQRT3_MULT_TS   (float32_t)((float32_t)TS * SQRT3)
 #define     LIMIT           (float32_t)(0.9f / SQRT3)
-
-uint8_t currentloop_enable;
+#define     MOTOR_CURRENT_OUTPUT_DEADBAND_MA 60.0f
+volatile uint8_t currentloop_enable;
 uint8_t motor_driver_cal_flag;
 uint8_t motor_driver_cal_init;
 volatile uint8_t motor_driver_cal_busy;
@@ -86,6 +87,10 @@ float32_t last_angle_corrected;
 uint16_t eangle_get;
 
 void MotorDriverSetMode(uint8_t val);
+static void MotorDriverApplyModeFromISR(uint8_t val);
+static void CurrentLoopResetOutput(void);
+
+static uint32_t applied_mode_generation = UINT32_MAX;
 
 
 
@@ -340,6 +345,8 @@ static void VoltageControl(float32_t udc)
 
 void MotorDriverInit(void)
 {
+    FastControlLinkInit();
+    applied_mode_generation = UINT32_MAX;
     currentloop_enable=0;
 	eAngle_360=0;
     vbus=12.0f;
@@ -352,9 +359,23 @@ void MotorDriverInit(void)
     motor_driver_cal_busy=0;
 }
 
+void MotorDriverPrepareCycleFromISR(void)
+{
+    FastControlCommandSnapshot command;
+    if (FastControlConsumeCommandFromISR(&command)) {
+        if (command.mode_generation != applied_mode_generation) {
+            MotorDriverApplyModeFromISR(command.driver_mode);
+            applied_mode_generation = command.mode_generation;
+        }
+        if (motor_driver_cal_busy == 0U) {
+            iq_curr_pi_target = command.iq_target_adc;
+        }
+    }
+}
+
 void MotorDriverProcess(void)
 {
-    angle_get=16383-EncoderGetAngle();
+    angle_get=16383-EncoderGetLatestAngle();
     if( angle_get>angle_offset )
     {
         angle_corrected = angle_get-angle_offset;
@@ -411,10 +432,18 @@ void MotorDriverProcess(void)
 
     Clarke_Park(ia,ib,ic);
 
-	if(currentloop_enable)
+    if(currentloop_enable)
     {
-        CurrentLoopCalc(6.4f);
-    }			
+        if (motor_driver_cal_busy == 0U && iq_curr_pi_target == 0.0f) {
+            /* An exact-zero command must be electrically quiet, not merely a
+             * zero current target that leaves both PI loops correcting ADC
+             * offset/noise around zero. Small non-zero torque requests stay
+             * continuous; clamping them here creates a relay limit cycle. */
+            CurrentLoopResetOutput();
+        } else {
+            CurrentLoopCalc(6.4f);
+        }
+    }
     
        
 	vbusLimitCalc(vbus);
@@ -443,51 +472,16 @@ uint16_t GetMotorDriverEncCalOffset(void)
 //  MDRV_MODE_ENC_CAL:      Calibrate encoder by inject a 0 deg iq and read the encoder value, 
 //please check busy while calibrating, after calibration, mode will be set to MDRV_MODE_OFF and release motor.
 //  MDRV_MODE_RUN:          Normally run mode with current loop.
-void MotorDriverSetMode(uint8_t val)
+static void MotorDriverApplyModeFromISR(uint8_t val)
 {
     switch(val)
     {
         case MDRV_MODE_OFF:
         {
-            rgb_flash_flag = 0;
-            switch (motor_mode)
-            {
-            case MODE_SPEED:
-            case MODE_SPEED_ERR_PROTECT:
-                rgb_color = 0x003200;
-                break;
-            case MODE_POS:
-            case MODE_POS_ERR_PROTECT:
-                rgb_color = 0x000032;
-                break;
-            case MODE_CURRENT:
-                rgb_color = 0x323200;
-                break;
-            
-            default:
-                break;
-            } 
-            if (sys_status == SYS_ERROR) {
-                rgb_color = 0x320000;
-            }          
-           
-            if (error_code)
-                sys_status = SYS_ERROR;
-            else
-                sys_status = SYS_STANDBY;
             GPIOB->BRR=1<<2; //DISABLE Driver Output
 
             currentloop_enable =0;//Disable current loop
-
-            iq_curr_pi_value    =0;
-            iq_curr_pi_error    =0;
-            iq_curr_pi_errSum   =0;
-            iq_curr_pi_result   =0;
-
-            id_curr_pi_value    =0;
-            id_curr_pi_error    =0;
-            id_curr_pi_errSum   =0;
-            id_curr_pi_result   =0;
+            CurrentLoopResetOutput();
 
             break;
         }
@@ -495,31 +489,6 @@ void MotorDriverSetMode(uint8_t val)
 
         case MDRV_MODE_RUN:
         {
-            rgb_flash_flag = 1;
-            switch (motor_mode)
-            {
-            case MODE_SPEED:
-            case MODE_SPEED_ERR_PROTECT:
-                rgb_color = 0x003200;
-                break;
-            case MODE_POS:
-            case MODE_POS_ERR_PROTECT:
-                rgb_color = 0x000032;
-                break;
-            case MODE_CURRENT:
-                rgb_color = 0x323200;
-                break;
-            
-            default:
-                break;
-            } 
-            if (sys_status == SYS_ERROR) {
-                rgb_color = 0x320000;
-            }             
-            // neopixel_set_color(0, rgb_color);
-            // neopixel_set_color(1, rgb_color); 
-            // ws2812_show();               
-            sys_status = SYS_RUNNING;
             GPIOB->BSRR=1<<2; //ENABLE Driver Output
             currentloop_enable =1;//Enable current loop
             break;
@@ -527,7 +496,6 @@ void MotorDriverSetMode(uint8_t val)
 
         case MDRV_MODE_ENC_CAL:
         {
-            sys_status = SYS_STANDBY;
             GPIOB->BSRR=1<<2;           //ENABLE Driver Output
             currentloop_enable =1;      //Enable current loop
             motor_driver_cal_init = 0;
@@ -539,6 +507,95 @@ void MotorDriverSetMode(uint8_t val)
 
     }
 
+}
+
+static void CurrentLoopResetOutput(void)
+{
+    iq_curr_pi_value  = 0.0f;
+    iq_curr_pi_error  = 0.0f;
+    iq_curr_pi_errSum = 0.0f;
+    iq_curr_pi_result = 0.0f;
+
+    id_curr_pi_value  = 0.0f;
+    id_curr_pi_error  = 0.0f;
+    id_curr_pi_errSum = 0.0f;
+    id_curr_pi_result = 0.0f;
+
+    ud = 0.0f;
+    uq = 0.0f;
+}
+
+void MotorDriverSetMode(uint8_t val)
+{
+    switch (val)
+    {
+        case MDRV_MODE_OFF:
+            rgb_flash_flag = 0;
+            switch (motor_mode)
+            {
+                case MODE_SPEED:
+                case MODE_SPEED_ERR_PROTECT:
+                    rgb_color = 0x003200;
+                    break;
+                case MODE_POS:
+                case MODE_POS_ERR_PROTECT:
+                    rgb_color = 0x000032;
+                    break;
+                case MODE_CURRENT:
+                    rgb_color = 0x323200;
+                    break;
+                default:
+                    break;
+            }
+            if (error_code) {
+                sys_status = SYS_ERROR;
+                rgb_color = 0x320000;
+            }
+            else {
+                sys_status = SYS_STANDBY;
+            }
+            break;
+
+        case MDRV_MODE_RUN:
+            rgb_flash_flag = 1;
+            switch (motor_mode)
+            {
+                case MODE_SPEED:
+                case MODE_SPEED_ERR_PROTECT:
+                    rgb_color = 0x003200;
+                    break;
+                case MODE_POS:
+                case MODE_POS_ERR_PROTECT:
+                    rgb_color = 0x000032;
+                    break;
+                case MODE_CURRENT:
+                    rgb_color = 0x323200;
+                    break;
+                default:
+                    break;
+            }
+            if (sys_status == SYS_ERROR) {
+                rgb_color = 0x320000;
+            }
+            sys_status = SYS_RUNNING;
+            break;
+
+        case MDRV_MODE_ENC_CAL:
+            sys_status = SYS_STANDBY;
+            motor_driver_cal_busy = 1U;
+            FastControlPublishCurrentAdc(0.0f);
+            break;
+
+        default:
+            return;
+    }
+
+    FastControlPublishDriverMode(val);
+}
+
+uint8_t MotorDriverIsOutputEnabled(void)
+{
+    return currentloop_enable != 0U;
 }
 
 //Set motor phase current by ADC value
@@ -554,7 +611,7 @@ void MotorDriverSetCurrentAdc(int32_t phase_current)
         if(phase_current< -1500)//-1.2A
         phase_current= -1500;
 
-        iq_curr_pi_target = (float32_t) phase_current;
+        FastControlPublishCurrentAdc((float32_t)phase_current);
     }
 }
 
@@ -563,7 +620,7 @@ void MotorDriverSetCurrentAdc(int32_t phase_current)
 //data type: float32_t
 //range: -1200.0f ~ 1200.0f, 0means 0current, motor spins free.
 // e.g.:  1.0f = 1mA, 1000.0f means about 1.0A
-void MotorDriverSetCurrentReal(float32_t phase_current)
+void MotorDriverSetCurrentRealContinuous(float32_t phase_current)
 {
     float32_t iq_calc = 0.0f;
     if(motor_driver_cal_busy ==0 )
@@ -573,8 +630,20 @@ void MotorDriverSetCurrentReal(float32_t phase_current)
         if(phase_current< -1200.0f)//-1.2A
         phase_current= -1200.0f;
         iq_calc = phase_current * 1.25f ;
-        iq_curr_pi_target = iq_calc;
+        FastControlPublishCurrentAdc(iq_calc);
     }
+}
+
+void MotorDriverSetCurrentReal(float32_t phase_current)
+{
+    /* Preserve the established quiet-zone behavior for the normal current,
+       speed and position modes. SmartKnob uses the continuous entry point
+       because a magnitude deadband creates a torque step inside a detent. */
+    if(phase_current >= -MOTOR_CURRENT_OUTPUT_DEADBAND_MA &&
+       phase_current <= MOTOR_CURRENT_OUTPUT_DEADBAND_MA) {
+        phase_current = 0.0f;
+    }
+    MotorDriverSetCurrentRealContinuous(phase_current);
 }
 
 //Get motor real-time phase current by ADC value
@@ -591,7 +660,7 @@ float32_t MotorDriverGetPhaseCurrentReal(void)
 
 void mt6816_update(void)
 {
-    EncoderGetAngle();    
+    (void)EncoderGetLatestAngle();
 }
 
 void MotorDriverSetUq(float32_t uq_set)
@@ -607,6 +676,11 @@ uint16_t MotorDriverGetMechanicalAngle(void)
     uint16_t mangle;
     mangle=(angle_corrected)*3600/16383;
     return mangle;
+}
+
+uint16_t MotorDriverGetEncoderRaw(void)
+{
+    return (uint16_t)angle_corrected;
 }
 
 

@@ -43,7 +43,7 @@
 - CH1/CH2/CH3：三相 PWM
 - CH4：PWM2，用作 ADC 触发源
 - MasterOutputTrigger：`TIM_TRGO_OC4REF`
-- Update IRQ：优先级 0
+- Update IRQ：优先级 0，与 DMA2 编码器 IRQ 相同；两条路径均不调用 FreeRTOS API
 
 运行方式：
 
@@ -81,18 +81,26 @@ SPI1 用于 TLE5012B 编码器：
 
 - Master。
 - 16-bit data。
-- CPOL high，CPHA second edge。
+- CPOL low，CPHA second edge（SPI Mode 1）。
 - NSS software。
-- Prescaler 16。
+- Prescaler 32，SCK 为 5.25 Mbit/s。
+- DMA2 Channel 1：SPI1_RX，normal、halfword、Very High priority，启用 TC/TE IRQ。
+- DMA2 Channel 2：SPI1_TX，normal、halfword、High priority，只启用 TE IRQ。
 
-`tle5012b.c` 直接访问 SPI 寄存器发送两个 16-bit word：
+`tle5012b.c` 每个 TIM1 update 周期用专用 LL/寄存器快路径重装两个 DMA 通道：
 
 ```text
 Tx: 0x8021, 0xffff
-Rx: 第二个 word 的低 15 位换算为角度
+Rx: 第二个 word 的 bit[14:1] 换算为 14-bit 角度
 ```
 
-`MotorDriverProcess()` 每次 FOC 处理都会调用 `EncoderGetAngle()` 读取当前角度。
+RX 完成中断等待 SPI `BSY` 有界清零并满足 CS hold 时间后提交角度，再接续本周期 FOC。`MotorDriverProcess()` 只读取刚提交的 `EncoderGetLatestAngle()`，不再轮询 SPI。DMA2 IRQ 和 TIM1 update 均为优先级 0，两者都不调用 FreeRTOS API 或任务通知。
+
+PA4 在 GPIO 初始化时即保持 CS high，满足首帧前至少 600 ns 空闲。启动阶段在 TIM1 快环 IRQ 开启前执行一次有界的 DMA 预热读取，用于初始化 SPI/DMA 状态并提交首个有效角度。该等待只发生一次；周期读取仍完全由 DMA 完成中断驱动。
+
+错误/超时/重叠恢复会先原子标记事务停止并关闭 DMA request/channel，再通过 RCC 复位 SPI1 以清空 TX/RX FIFO 和错误标志；保持 CS low 满足 hold 后再拉高并重新使能 SPI。正常完成路径不执行外设复位。
+
+TIM1 配置了 debug-freeze：仅当调试器 halt CPU 时暂停快环时基，避免 ST-Link 观察现场时定时器继续运行并制造虚假的 DMA overlap；脱离调试器后不影响运行频率。
 
 ## I2C1
 

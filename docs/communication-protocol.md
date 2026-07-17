@@ -11,7 +11,7 @@
 | 2 | `COMM_TYPE_CAN` | 本机启用 CAN 协议 |
 | 3 | `COMM_TYPE_CAN_I2C` | 本机同时启用 I2C 和 CAN，CAN 可桥接 I2C |
 
-启动时 `InitMysys()` 读取 Flash 中保存的 `comm_type`，然后选择初始化路径。
+启动时 `InitMysys()` 读取 Flash 中保存的 `comm_type`，然后选择初始化路径。page 59 没有有效配置时默认使用 `COMM_TYPE_CAN`；没有版本标记的旧配置会先在 RAM 中迁移到 CAN，版本标记随下一次正常配置保存写入。标记写入后，用户显式保存的通信模式仍优先。
 
 ## I2C 从机协议
 
@@ -136,11 +136,12 @@ identifier = (cmd_id << 24) | (option << 8) | can_id
 | `FUNC_DIAL_COUNTER` | `0x7033` | Dial 计数 |
 | `FUNC_VIN` | `0x7034` | 输入电压 |
 | `FUNC_TEMP` | `0x7035` | 温度 |
+| `FUNC_OVERVOLTAGE_PROTECTION_RELEASE_MODE` | `0x7040` | 过压释放模式：0 手动，1 电压稳定后自动软恢复 |
 | `FUNC_RGB_MODE` | `0x7050` | RGB 模式 |
 | `FUNC_RGB_COLOR` | `0x7051` | RGB 颜色 |
 | `FUNC_RGB_BRIGHTNESS` | `0x7052` | RGB 亮度 |
 
-部分枚举如过压保护释放模式、最大堵转尝试次数、堵转阈值和超时已定义，但当前 CAN 读写分支没有完整实现。
+`0x7040` 已接入 function read/write；最大堵转尝试次数、堵转阈值和超时等其他枚举仍未完整接入 CAN 读写分支。
 
 ## CAN 状态反馈
 
@@ -169,3 +170,9 @@ function read 响应使用：
 data[0..1] = function index
 data[4..7] = int32 value
 ```
+
+## 固件 SmartKnob 扩展
+
+`0x8001–0x8304` 为固件本地 SmartKnob 的模式、调参、主动遥测和状态读取 function。SmartKnob 打开主动遥测后，不需要上位机轮询角度或电流：固件会用 `cmd=0x17/0x18` 成对推送逻辑状态和运动/电流状态。
+
+完整的 function 表、缩放、帧字段、模式索引和推荐启动顺序见 [固件 SmartKnob](smartknob-firmware.md)。

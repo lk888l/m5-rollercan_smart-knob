@@ -1,128 +1,139 @@
 /*
-   smartknob - Copyright 2022 Scott Bezek
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-*/
+ * SmartKnob firmware-owned haptic control.
+ *
+ * The public configuration fields intentionally follow scottbez1/smartknob,
+ * while the tuning fields describe this motor's current-mode actuator.
+ */
 #ifndef __SMART_KNOB_H__
 #define __SMART_KNOB_H__
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "main.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define SMART_KNOB_MAX_DETENT_POSITIONS 5U
+#define SMART_KNOB_TELEMETRY_PROTOCOL_VERSION 1U
+#define SMART_KNOB_TELEMETRY_COMMAND_ID 0x17U
+#define SMART_KNOB_TELEMETRY_STATE_TYPE 0x01U
+#define SMART_KNOB_TELEMETRY_MOTION_TYPE 0x02U
 
 typedef uint_least16_t pb_size_t;
 
 typedef struct _PB_SmartKnobConfig {
-    /* *
- Set the integer position.
-
- Note: in order to make SmartKnobConfig apply idempotently, the current position
- will only be set to this value when it changes compared to a previous config (and
- NOT compared to the current state!). So by default, if you send a config position
- of 5 and the current position is 3, the position may remain at 3 if the config
- change to 5 was previously handled. If you need to force a position update, see
- position_nonce. */
     int32_t position;
-    /* *
- Set the fractional position. Typical range: (-snap_point, snap_point).
-
- Actual range is technically unbounded, but in practice this value will be compared
- against snap_point on the next control loop, so any value beyond the snap_point will
- generally result in an integer position change (unless position is already at a
- limit).
-
- Note: idempotency implications noted in the documentation for `position` apply here
- as well */
     float sub_position_unit;
-    /* *
- Position is normally only applied when it changes, but sometimes it's desirable
- to reset the position to the same value, so a nonce change can be used to force
- the position values to be applied as well.
-
- NOTE: Must be < 256 */
     uint8_t position_nonce;
-    /* * Minimum position allowed. */
     int32_t min_position;
-    /* *
- Maximum position allowed.
-
- If this is the same as min_position, there will only be one allowed position.
-
- If this is less than min_position, bounds will be disabled. */
     int32_t max_position;
-    /* * The angular "width" of each position/detent, in radians. */
     float position_width_radians;
-    /* *
- Strength of detents to apply. Typical range: [0, 1].
-
- A value of 0 disables detents.
-
- Values greater than 1 are not recommended and may lead to unstable behavior. */
     float detent_strength_unit;
-    /* *
- Strength of endstop torque to apply at min/max bounds. Typical range: [0, 1].
-
- A value of 0 disables endstop torque, but does not make position unbounded, meaning
- the knob will not try to return to the valid region. For unbounded rotation, use
- min_position and max_position.
-
- Values greater than 1 are not recommended and may lead to unstable behavior. */
     float endstop_strength_unit;
-    /* *
- Fractional (sub-position) threshold where the position will increment/decrement.
- Typical range: (0.5, 1.5).
-
- This defines how hysteresis is applied to positions, which is why values > */
     float snap_point;
-    /* *
- Arbitrary 50-byte string representing this "config". This can be used to identify major
- config/mode changes. The value will be echoed back to the host via a future State's
- embedded config field so the host can use this value to determine the mode that was
- in effect at the time of the State snapshot instead of having to infer it from the
- other config fields. */
     char text[51];
-    /* *
- For a "magnetic" detent mode - where not all positions should have detents - this
- specifies which positions (up to 5) have detents enabled. The knob will feel like it
- is "magnetically" attracted to those positions, and will rotate smoothy past all
- other positions.
-
- If you want to have more than 5 magnetic detent positions, you will need to dynamically
- update this list as the knob is rotated. A recommended approach is to always send the
- _nearest_ 5 detent positions, and send a new Config message whenever the list of
- positions nearest the current position (as reported via State messages) changes.
-
- This approach enables effectively unbounded detent positions while keeping Config
- bounded in size, and is resilient against tightly-packed detents with fast rotation
- since multiple detent positions can be sent in advance; a full round-trip Config-State
- isn't needed between each detent in order to keep up. */
     pb_size_t detent_positions_count;
-    int32_t detent_positions[5];
-    /* *
- Advanced feature for shifting the defined snap_point away from the center (position 0)
- for implementing asymmetric detents. Typical value: 0 (symmetric detent force).
-
- This can be used to create detents that will hold the position when carefully released,
- but can be easily disturbed to return "home" towards position 0. */
+    int32_t detent_positions[SMART_KNOB_MAX_DETENT_POSITIONS];
     float snap_point_bias;
-    /* *
- Hue (0-255) for all 8 ring LEDs, if supported. Note: this will likely be replaced
- with more configurability in a future protocol version. */
-    int16_t led_hue;
+    int32_t led_hue;
 } PB_SmartKnobConfig;
 
-extern float motor_pid_velocity_p;
-extern int32_t current_position;
+typedef struct {
+    /* (P * position_error - D * velocity) * current_scale_a. */
+    float p_gain;
+    float d_gain;
+    float current_scale_a;
+    float current_limit_a;
+    uint16_t max_current_permille;
+    float friction_current_a;
+    float click_current_a;
+} SmartKnobTuning;
 
+typedef struct {
+    PB_SmartKnobConfig config;
+    SmartKnobTuning tuning;
+} SmartKnobModeConfig;
+
+typedef struct {
+    uint8_t active_mode;
+    uint8_t flags;
+    int32_t current_position;
+    float sub_position_unit;
+    float shaft_angle_rad;
+    float shaft_velocity_rad_s;
+    float commanded_current_ma;
+    float measured_current_ma;
+} SmartKnobRuntimeState;
+
+typedef struct {
+    uint8_t sequence;
+    uint8_t type;
+    uint8_t destination_id;
+    uint8_t data[8];
+} SmartKnobTelemetryFrame;
+
+/* CAN function indices used by the firmware-owned SmartKnob protocol. */
+enum {
+    SMART_KNOB_FUNC_MODE = 0x8001,
+    SMART_KNOB_FUNC_TELEMETRY_ENABLE = 0x8002,
+    SMART_KNOB_FUNC_TELEMETRY_RATE_HZ = 0x8003,
+    SMART_KNOB_FUNC_TELEMETRY_HOST_ID = 0x8004,
+    SMART_KNOB_FUNC_MODE_COUNT = 0x8005,
+    SMART_KNOB_FUNC_PROTOCOL_VERSION = 0x8006,
+
+    SMART_KNOB_FUNC_P_GAIN = 0x8101,
+    SMART_KNOB_FUNC_D_GAIN = 0x8102,
+    SMART_KNOB_FUNC_CURRENT_SCALE = 0x8103,
+    SMART_KNOB_FUNC_CURRENT_LIMIT = 0x8104,
+    SMART_KNOB_FUNC_MAX_CURRENT_PERMILLE = 0x8105,
+    SMART_KNOB_FUNC_FRICTION_CURRENT = 0x8106,
+    SMART_KNOB_FUNC_CLICK_CURRENT = 0x8107,
+
+    SMART_KNOB_FUNC_CUSTOM_POSITION = 0x8201,
+    SMART_KNOB_FUNC_CUSTOM_MIN_POSITION = 0x8202,
+    SMART_KNOB_FUNC_CUSTOM_MAX_POSITION = 0x8203,
+    SMART_KNOB_FUNC_CUSTOM_WIDTH_DEG = 0x8204,
+    SMART_KNOB_FUNC_CUSTOM_DETENT_STRENGTH = 0x8205,
+    SMART_KNOB_FUNC_CUSTOM_ENDSTOP_STRENGTH = 0x8206,
+    SMART_KNOB_FUNC_CUSTOM_SNAP_POINT = 0x8207,
+    SMART_KNOB_FUNC_CUSTOM_SNAP_BIAS = 0x8208,
+    SMART_KNOB_FUNC_CUSTOM_CLICK_CURRENT = 0x8209,
+    SMART_KNOB_FUNC_CUSTOM_FRICTION_CURRENT = 0x820A,
+    SMART_KNOB_FUNC_CUSTOM_CURRENT_SCALE = 0x820B,
+    SMART_KNOB_FUNC_CUSTOM_P_GAIN = 0x820C,
+    SMART_KNOB_FUNC_CUSTOM_D_GAIN = 0x820D,
+    SMART_KNOB_FUNC_CUSTOM_LED_HUE = 0x820E,
+
+    SMART_KNOB_FUNC_STATE_POSITION = 0x8301,
+    SMART_KNOB_FUNC_STATE_SUB_POSITION = 0x8302,
+    SMART_KNOB_FUNC_STATE_COMMAND_CURRENT = 0x8303,
+    SMART_KNOB_FUNC_STATE_MEASURED_CURRENT = 0x8304,
+};
+
+/* Compatibility entry points used by the existing mode controller. */
 void init_smart_knob(void);
 void handle_smart_knob(void);
+void smart_knob_set_update_rate(float update_rate_hz);
+
+bool smart_knob_select_mode(uint8_t mode_index);
+uint8_t smart_knob_active_mode(void);
+const SmartKnobModeConfig *smart_knob_active_config(void);
+
+bool smart_knob_read_parameter(uint16_t index, int32_t *value);
+bool smart_knob_write_parameter(uint16_t index, int32_t value, uint8_t host_id);
+
+bool smart_knob_telemetry_enabled(void);
+bool smart_knob_build_telemetry(uint32_t now_ms, SmartKnobTelemetryFrame *frame);
+bool smart_knob_get_runtime_state(SmartKnobRuntimeState *state);
+
+extern int32_t current_position;
+extern float latest_sub_position_unit;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

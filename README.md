@@ -16,10 +16,12 @@ ROLLERCAN 是一个基于 STM32G431 的无刷电机控制固件。工程由 STM3
 | 文档 | 内容 |
 | --- | --- |
 | [系统架构](docs/architecture.md) | 目录结构、模块分层、数据流、上下文边界 |
+| [C++/FreeRTOS 重构](docs/freertos-refactor.md) | 当前迁移状态、任务/ISR 边界、频率和后续硬件验证门槛 |
 | [启动与运行流程](docs/runtime-flow.md) | 上电初始化、主循环、TIM1 中断调度、模式切换 |
 | [构建与烧录](docs/build-and-flash.md) | CMake/MDK 工程、工具链、构建命令、产物 |
 | [外设与引脚](docs/peripherals.md) | TIM/ADC/SPI/I2C/FDCAN/GPIO/DMA 的用途 |
 | [控制链路](docs/control-loop.md) | FOC、电流环、速度环、位置环、电流模式、Dial 模式 |
+| [固件 SmartKnob](docs/smartknob-firmware.md) | 模块化模式、默认预设、CAN 在线配置和主动遥测 |
 | [通信协议](docs/communication-protocol.md) | I2C 寄存器表、CAN 命令、CAN-I2C 桥接 |
 | [显示与输入](docs/display-and-input.md) | OLED 页面、菜单、按键、灯效 |
 | [持久化配置](docs/persistence.md) | Flash 数据布局、读写时机、保护状态保存 |
@@ -31,6 +33,10 @@ ROLLERCAN 是一个基于 STM32G431 的无刷电机控制固件。工程由 STM3
 ```text
 Core/
   Inc/, Src/          STM32CubeMX 生成的外设初始化、中断入口和系统文件
+App/
+  inc/, src/          C++17/FreeRTOS 静态任务和 C/C++ 边界
+Middlewares/
+  Third_Party/        STM32CubeG4 配套的 FreeRTOS 内核
 MyFile/
   inc/, src/          手写业务模块：电机控制、系统调度、显示、按键、灯效、ADC、编码器等
 U8g2_lib/             裁剪后的 U8g2/u8x8 显示库源码
@@ -43,7 +49,7 @@ STM32G431XX_FLASH.ld  GCC 链接脚本
 
 ## 一句话运行图
 
-`main()` 完成外设初始化后调用 `InitMysys()`，随后进入 `LoopMysys()` 的常驻 UI/通信维护循环；真正的电机实时控制由 TIM1 更新中断进入 `mysys_tim1_update_handler()`，按分频执行 `Loop_FOC()`、`Loop_Control()` 和模式控制逻辑。
+`main()` 完成外设初始化和 `InitMysys()` 后启动 FreeRTOS。1 kHz ControlTask 独占外环、保护状态机、SmartKnob 和本机控制状态；CommunicationTask 独占 FDCAN FIFO/发送并隔离 CAN-I2C 桥接；MaintenanceTask 负责 UI/按键/慢速维护，StorageTask 在电机停止后执行 Flash 写回。TIM1 中断以约 18.67 kHz 启动编码器 DMA，DMA2 RX 完成中断提交同周期角度并接续 FOC。ControlTask 与 FOC 通过带序号的驱动命令和传感器快照交换数据。
 
 ```text
 上电
@@ -51,14 +57,18 @@ STM32G431XX_FLASH.ld  GCC 链接脚本
   -> MX_GPIO/MX_DMA/MX_ADC/MX_TIM/MX_SPI/MX_I2C/MX_FDCAN
   -> InitMysys
        -> ADC DMA / TIM1 PWM / 电机驱动 / 编码器 / Flash 配置 / OLED / 通信
-  -> LoopMysys
-       -> 按键、显示、灯效、通信恢复、配置写回
+  -> App_StartScheduler
+       -> ControlTask: 1 kHz 外环、保护、SmartKnob 和本机命令执行
+       -> CommunicationTask: FDCAN RX/TX、帧解码和 CAN-I2C 桥接
+       -> MaintenanceTask: 按键、显示、灯效、通信恢复
+       -> StorageTask: 安全状态下的 Flash 写回
 
 TIM1_UP_TIM16_IRQHandler
-  -> mysys_tim1_update_handler
-       -> Loop_FOC
-       -> Loop_Control
-       -> speed_pid / pos_pid / handle_smart_knob
+  -> MysysFastLoopISR
+       -> 启动 TLE5012B SPI1 DMA2
+DMA2_Channel1_IRQHandler
+  -> 提交本周期编码器角度
+  -> Loop_FOC
 ```
 
 ## 构建
@@ -74,7 +84,9 @@ cmake --build build\Debug
 
 ## 维护原则
 
-- `Core/Src/stm32g4xx_it.c` 应保留公开 IRQ 入口，业务中断逻辑放到 helper 函数中调用，例如 `mysys_tim1_update_handler()` 和 `i2c1_event_irq_handler()`。
+- `Core/Src/stm32g4xx_it.c` 保留公开 IRQ 入口，TIM1 业务中断逻辑由 `MysysFastLoopISR()` 承担；该函数不得调用 FreeRTOS API。
+- 调度器启动后，CAN 和按键命令必须通过静态队列进入 ControlTask；CommunicationTask 不得直接写 `motor_mode`、setpoint、PID 积分项或 fault state。
+- ControlTask 与 TIM1 ISR 之间的数据必须通过 `fast_control_link` 交换；不要重新从任务直接修改 `currentloop_enable`、电流 PI 积分项或 PWM 驱动使能。
 - `MyFile/src/mysys.c` 是系统状态、模式、PID 和保护逻辑的中心，改模式或单位时先从这里追数据流。
 - `main.c` 中的 `Slave_Complete_Callback()` 是 I2C 寄存器协议入口；`Core/Src/fdcan.c` 是 CAN 协议和 CAN-I2C 桥接入口。
 - `U8g2_lib` 已按当前 OLED 功能裁剪，增加字体或 U8g2 源文件前应先看 map/size。

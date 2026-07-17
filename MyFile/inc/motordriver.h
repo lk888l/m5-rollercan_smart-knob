@@ -19,10 +19,12 @@ extern float32_t last_angle_corrected;
 extern float32_t angle_corrected;
 
 void MotorDriverInit(void);
+void MotorDriverPrepareCycleFromISR(void);
 void MotorDriverProcess(void);
 void MotorDriverInterrupt(void);
 
 uint16_t MotorDriverGetMechanicalAngle(void);
+uint16_t MotorDriverGetEncoderRaw(void);
 
 void MotorDriverSetUq(float32_t uq_set);
 
@@ -32,6 +34,8 @@ void MotorDriverSetAngleOffset(float32_t offset);
 
 void MotorDriverSetMode(uint8_t val);
 
+uint8_t MotorDriverIsOutputEnabled(void);
+
 uint8_t IsMotorDriverEncCalBusy(void);
 
 uint16_t GetMotorDriverEncCalOffset(void);
@@ -39,6 +43,8 @@ uint16_t GetMotorDriverEncCalOffset(void);
 void MotorDriverSetCurrentAdc(int32_t phase_current);
 
 void MotorDriverSetCurrentReal(float32_t phase_current);
+
+void MotorDriverSetCurrentRealContinuous(float32_t phase_current);
 
 float32_t MotorDriverGetPhaseCurrentAdc(void);
 

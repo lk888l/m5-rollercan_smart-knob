@@ -49,7 +49,9 @@ void MX_TIM1_Init(void)
   htim1.Init.CounterMode = TIM_COUNTERMODE_CENTERALIGNED1;
   htim1.Init.Period = 1000-1;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim1.Init.RepetitionCounter = 0;
+  /* PWM and ADC trigger still run every timer period.  Generate an update
+     interrupt only once every three periods for the 18.67 kHz FOC loop. */
+  htim1.Init.RepetitionCounter = 2;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
   {
@@ -113,7 +115,10 @@ void MX_TIM1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN TIM1_Init 2 */
-
+  /* Keep the fast-loop time base stopped while a debugger halts the core.
+     Otherwise ST-Link inspection can let TIM1 advance while its DMA-complete
+     ISR is paused and manufacture a false encoder-DMA overlap. */
+  __HAL_DBGMCU_FREEZE_TIM1();
   /* USER CODE END TIM1_Init 2 */
   HAL_TIM_MspPostInit(&htim1);
 
