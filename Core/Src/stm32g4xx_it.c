@@ -50,6 +50,13 @@ extern void xPortSysTickHandler(void);
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
+#if ROLLERCAN_USE_FREERTOS
+/* CubeMX always emits empty CMSIS SVC/PendSV handlers when FreeRTOS is not
+   configured through the .ioc. Rename only those generated definitions; the
+   vector symbols remain owned by the manually integrated FreeRTOS port. */
+#define SVC_Handler CubeMxUnusedSVC_Handler
+#define PendSV_Handler CubeMxUnusedPendSV_Handler
+#endif
 
 /* USER CODE END PM */
 
@@ -506,9 +513,9 @@ extern void xPortSysTickHandler(void);
 /* External variables --------------------------------------------------------*/
 extern DMA_HandleTypeDef hdma_adc1;
 extern FDCAN_HandleTypeDef hfdcan1;
-extern DMA_HandleTypeDef hdma_tim3_ch2;
 extern DMA_HandleTypeDef hdma_spi1_rx;
 extern DMA_HandleTypeDef hdma_spi1_tx;
+extern DMA_HandleTypeDef hdma_tim3_ch2;
 extern TIM_HandleTypeDef htim1;
 /* USER CODE BEGIN EV */
 
@@ -595,7 +602,6 @@ void UsageFault_Handler(void)
 /**
   * @brief This function handles System service call via SWI instruction.
   */
-#if !ROLLERCAN_USE_FREERTOS
 void SVC_Handler(void)
 {
   /* USER CODE BEGIN SVCall_IRQn 0 */
@@ -605,7 +611,6 @@ void SVC_Handler(void)
 
   /* USER CODE END SVCall_IRQn 1 */
 }
-#endif
 
 /**
   * @brief This function handles Debug monitor.
@@ -623,7 +628,6 @@ void DebugMon_Handler(void)
 /**
   * @brief This function handles Pendable request for system service.
   */
-#if !ROLLERCAN_USE_FREERTOS
 void PendSV_Handler(void)
 {
   /* USER CODE BEGIN PendSV_IRQn 0 */
@@ -633,7 +637,6 @@ void PendSV_Handler(void)
 
   /* USER CODE END PendSV_IRQn 1 */
 }
-#endif
 
 /**
   * @brief This function handles System tick timer.
@@ -691,6 +694,71 @@ void DMA1_Channel3_IRQHandler(void)
 }
 
 /**
+  * @brief This function handles FDCAN1 interrupt 0.
+  */
+void FDCAN1_IT0_IRQHandler(void)
+{
+  /* USER CODE BEGIN FDCAN1_IT0_IRQn 0 */
+
+  /* USER CODE END FDCAN1_IT0_IRQn 0 */
+  HAL_FDCAN_IRQHandler(&hfdcan1);
+  /* USER CODE BEGIN FDCAN1_IT0_IRQn 1 */
+
+  /* USER CODE END FDCAN1_IT0_IRQn 1 */
+}
+
+/**
+  * @brief This function handles TIM1 update interrupt and TIM16 global interrupt.
+  */
+void TIM1_UP_TIM16_IRQHandler(void)
+{
+  /* USER CODE BEGIN TIM1_UP_TIM16_IRQn 0 */
+  /* TIM1 update shares this NVIC vector with TIM16. Only start a new encoder
+     DMA transaction for a real, enabled TIM1 update event. A pending/shared
+     vector entry without UIF used to re-enter the fast loop during the first
+     DMA frame and abort that transfer as an overlap. */
+  if ((__HAL_TIM_GET_FLAG(&htim1, TIM_FLAG_UPDATE) != RESET) &&
+      (__HAL_TIM_GET_IT_SOURCE(&htim1, TIM_IT_UPDATE) != RESET)) {
+    __HAL_TIM_CLEAR_IT(&htim1, TIM_IT_UPDATE);
+    MysysFastLoopISR();
+  } else {
+    HAL_NVIC_ClearPendingIRQ(TIM1_UP_TIM16_IRQn);
+  }
+  return;
+  /* USER CODE END TIM1_UP_TIM16_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim1);
+  /* USER CODE BEGIN TIM1_UP_TIM16_IRQn 1 */
+
+  /* USER CODE END TIM1_UP_TIM16_IRQn 1 */
+}
+
+/**
+  * @brief This function handles I2C1 event interrupt / I2C1 wake-up interrupt through EXTI line 23.
+  */
+void I2C1_EV_IRQHandler(void)
+{
+  /* USER CODE BEGIN I2C1_EV_IRQn 0 */
+  i2c1_event_irq_handler();
+  /* USER CODE END I2C1_EV_IRQn 0 */
+  /* USER CODE BEGIN I2C1_EV_IRQn 1 */
+
+  /* USER CODE END I2C1_EV_IRQn 1 */
+}
+
+/**
+  * @brief This function handles I2C1 error interrupt.
+  */
+void I2C1_ER_IRQHandler(void)
+{
+  /* USER CODE BEGIN I2C1_ER_IRQn 0 */
+  i2c1_error_irq_handler();
+  /* USER CODE END I2C1_ER_IRQn 0 */
+  /* USER CODE BEGIN I2C1_ER_IRQn 1 */
+
+  /* USER CODE END I2C1_ER_IRQn 1 */
+}
+
+/**
   * @brief This function handles DMA2 channel1 global interrupt.
   */
 void DMA2_Channel1_IRQHandler(void)
@@ -734,61 +802,6 @@ void DMA2_Channel2_IRQHandler(void)
   /* USER CODE END DMA2_Channel2_IRQn 1 */
 }
 
-/**
-  * @brief This function handles FDCAN1 interrupt 0.
-  */
-void FDCAN1_IT0_IRQHandler(void)
-{
-  /* USER CODE BEGIN FDCAN1_IT0_IRQn 0 */
-
-  /* USER CODE END FDCAN1_IT0_IRQn 0 */
-  HAL_FDCAN_IRQHandler(&hfdcan1);
-  /* USER CODE BEGIN FDCAN1_IT0_IRQn 1 */
-
-  /* USER CODE END FDCAN1_IT0_IRQn 1 */
-}
-
-/**
-  * @brief This function handles I2C1 event interrupt / I2C1 wake-up interrupt through EXTI line 23.
-  */
-void I2C1_EV_IRQHandler(void)
-{
-  /* USER CODE BEGIN I2C1_EV_IRQn 0 */
-  i2c1_event_irq_handler();
-  /* USER CODE END I2C1_EV_IRQn 0 */
-  /* USER CODE BEGIN I2C1_EV_IRQn 1 */
-
-  /* USER CODE END I2C1_EV_IRQn 1 */
-}
-
-/**
-  * @brief This function handles I2C1 error interrupt.
-  */
-void I2C1_ER_IRQHandler(void)
-{
-  /* USER CODE BEGIN I2C1_ER_IRQn 0 */
-  i2c1_error_irq_handler();
-  /* USER CODE END I2C1_ER_IRQn 0 */
-  /* USER CODE BEGIN I2C1_ER_IRQn 1 */
-
-  /* USER CODE END I2C1_ER_IRQn 1 */
-}
-
 /* USER CODE BEGIN 1 */
-
-void TIM1_UP_TIM16_IRQHandler(void)
-{
-  /* TIM1 update shares this NVIC vector with TIM16.  Only start a new encoder
-     DMA transaction for a real, enabled TIM1 update event.  A pending/shared
-     vector entry without UIF used to re-enter the fast loop during the first
-     DMA frame and abort that transfer as an overlap. */
-  if ((__HAL_TIM_GET_FLAG(&htim1, TIM_FLAG_UPDATE) != RESET) &&
-      (__HAL_TIM_GET_IT_SOURCE(&htim1, TIM_IT_UPDATE) != RESET)) {
-    __HAL_TIM_CLEAR_IT(&htim1, TIM_IT_UPDATE);
-    MysysFastLoopISR();
-  } else {
-    HAL_NVIC_ClearPendingIRQ(TIM1_UP_TIM16_IRQn);
-  }
-}
 
 /* USER CODE END 1 */

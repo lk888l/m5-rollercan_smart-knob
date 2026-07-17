@@ -82,10 +82,10 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/src/app_rtos.cpp
     App/src/fast_control_link.cpp
     App/src/runtime_metrics.cpp
-    Middlewares/Third_Party/FreeRTOS/Source/list.c
-    Middlewares/Third_Party/FreeRTOS/Source/queue.c
-    Middlewares/Third_Party/FreeRTOS/Source/tasks.c
-    Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F/port.c
+    ThirdParty/FreeRTOS-Kernel/list.c
+    ThirdParty/FreeRTOS-Kernel/queue.c
+    ThirdParty/FreeRTOS-Kernel/tasks.c
+    ThirdParty/FreeRTOS-Kernel/portable/GCC/ARM_CM4F/port.c
 )
 
 # Add include paths
@@ -96,8 +96,8 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     MyFile/inc
     U8g2_lib
     App/inc
-    Middlewares/Third_Party/FreeRTOS/Source/include
-    Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F
+    ThirdParty/FreeRTOS-Kernel/include
+    ThirdParty/FreeRTOS-Kernel/portable/GCC/ARM_CM4F
 )
 
 # Add project symbols (macros)

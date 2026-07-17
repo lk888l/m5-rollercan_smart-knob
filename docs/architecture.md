@@ -10,7 +10,7 @@ ROLLERCAN 固件可以按四层理解：
 | CubeMX 外设层 | `Core/Src/*.c`, `Core/Inc/*.h`, `cmake/stm32cubemx` | GPIO、ADC、DMA、TIM、SPI、I2C、FDCAN 初始化和 IRQ 入口 |
 | RTOS 应用层 | `App/src/app_rtos.cpp`, `App/inc/app_rtos.h` | C++17 静态任务、控制邮箱和 C/C++ 边界 |
 | 业务控制层 | `MyFile/src/*.c`, `MyFile/inc/*.h`, `Core/Src/flash.c`, `Core/Src/i2c_ex.c` | 电机控制、通信协议、显示菜单、灯效、参数保存 |
-| 第三方库 | `Middlewares/Third_Party/FreeRTOS`, `U8g2_lib`, CMSIS/HAL/LL | 调度、OLED 绘图、ARM 数学函数和 STM32 驱动 |
+| 第三方库 | `ThirdParty/FreeRTOS-Kernel`, `U8g2_lib`, CMSIS/HAL/LL | 调度、OLED 绘图、ARM 数学函数和 STM32 驱动 |
 
 ## 运行上下文
 

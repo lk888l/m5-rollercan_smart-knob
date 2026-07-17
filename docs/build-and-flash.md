@@ -47,6 +47,7 @@ cmake --build build\Debug
 - `file(GLOB MYFILE_SOURCES "MyFile/src/*.c")` 收集手写业务源。
 - 显式列出当前需要参与链接的 U8g2 源文件。
 - 手动加入 `Core/Src/flash.c` 和 `Core/Src/i2c_ex.c`。
+- 从 CubeMX 管理目录外的 `ThirdParty/FreeRTOS-Kernel` 加入 FreeRTOS kernel 和 Cortex-M4F port。
 - 添加 `MyFile/inc`、`U8g2_lib`、CMSIS-DSP include 路径。
 
 `cmake/stm32cubemx/CMakeLists.txt`：
@@ -63,7 +64,8 @@ cmake --build build\Debug
 - ABI：hard-float。
 - Debug：`-O0 -g3`。
 - Release：`-Os -g0`。
-- 链接脚本：`STM32G431XX_FLASH.ld`。
+- 实际应用链接脚本：`linker/ROLLERCAN_APP.ld`。CubeMX 仍可重新生成默认的
+  `STM32G431XX_FLASH.ld`，但 CMake 工具链不会使用它。
 - 链接选项包含 `--gc-sections`、map 文件输出和内存占用打印。
 
 ## 构建产物
