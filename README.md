@@ -13,7 +13,7 @@ The firmware's core responsibilities are:
 - Running the FOC current loop using TIM1 three-phase PWM and ADC sampling.
 - Obtaining the rotor angle and mechanical position through the TLE5012B SPI encoder.
 - Providing four operating modes: speed, position, current, and Dial/SmartKnob.
-- Sending and receiving control commands through an I2C slave register protocol and a CAN extended-frame protocol.
+- Sending and receiving control commands through an I2C slave register protocol and a CAN FD extended-ID protocol.
 - Displaying status, menus, and alerts on a 64x48 SSD1306 OLED and two SK6812/WS2812 LEDs.
 - Saving settings such as the I2C address, CAN ID, communication mode, PID parameters, and protection switches to internal Flash.
 
@@ -78,6 +78,32 @@ DMA2_Channel1_IRQHandler
   -> Submit the encoder angle for the current cycle
   -> Loop_FOC
 ```
+
+## CAN FD Bus Configuration
+
+With the default `bps_index=0`, the firmware CAN bus configuration exactly matches:
+
+```bash
+sudo ip link set can0 type can bitrate 1000000 sample-point 0.8 dbitrate 5000000 dsample-point 0.75 sjw 5 dsjw 3 fd on
+```
+
+FDCAN uses the 80 MHz PLLQ output derived from the 160 MHz system PLL. The nominal
+phase uses prescaler 1, `1 + 63 + 16` time quanta, and SJW 5, producing exactly
+1 Mbit/s with an 80% sample point. The data phase uses prescaler 1,
+`1 + 11 + 4` time quanta, and DSJW 3, producing exactly 5 Mbit/s with a 75%
+sample point. Transmitted protocol frames are 8-byte CAN FD extended-ID frames
+with bit-rate switching enabled.
+
+The legacy baud-rate selections remain available: `bps_index=1` and
+`bps_index=2` change only the nominal phase to 500 kbit/s and 125 kbit/s,
+respectively; the host CAN interface must be configured to the same nominal
+rate. The data phase remains at 5 Mbit/s.
+
+The PLL, FDCAN timing, TIM1, and TIM3 settings are also stored in
+`ROLLERCAN.ioc`, so regenerating the project with STM32CubeMX preserves them.
+The move from 168 MHz to 160 MHz is compensated by TIM1 period 952 and TIM3
+period 200: the FOC interrupt remains approximately 18.67 kHz and the LED data
+rate remains 800 kHz. SPI1 now runs at 5.0 Mbit/s.
 
 ## Build
 

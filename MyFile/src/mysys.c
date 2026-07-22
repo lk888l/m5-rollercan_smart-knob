@@ -590,7 +590,7 @@ void InitMysys(void)
   GPIOB->BSRR=1<<1;//enable DRV8311 to enable intrlnal current sensor
 
 	MyADCInit();
-	TIM1->CCR4=995;//Enable TIM1 CH4 for ADC trigger
+	TIM1->CCR4=947;//Enable TIM1 CH4 for ADC trigger
 
 	/* Initialise every dependency used by the fast loop before TIM1 can enter it.
 	 * EncoderInit() prepares SPI1 plus both DMA2 channels; starting TIM1 earlier

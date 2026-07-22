@@ -22,7 +22,7 @@
 
 #define     LIMIT_UDC       24.0f
 #define     SQRT3           1.732050808f
-#define     TS              1000
+#define     TS              952
 #define     SQRT3_MULT_TS   (float32_t)((float32_t)TS * SQRT3)
 #define     LIMIT           (float32_t)(0.9f / SQRT3)
 #define     MOTOR_CURRENT_OUTPUT_DEADBAND_MA 60.0f

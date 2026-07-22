@@ -39,7 +39,7 @@
 
 - Prescaler：`3-1`
 - CounterMode：Center-aligned 1
-- Period：`1000-1`
+- Period：`952-1`（160 MHz 系统时钟下保持原有约 56 kHz update 频率）
 - CH1/CH2/CH3：三相 PWM
 - CH4：PWM2，用作 ADC 触发源
 - MasterOutputTrigger：`TIM_TRGO_OC4REF`
@@ -48,7 +48,7 @@
 运行方式：
 
 - `InitMysys()` 启动 CH1/CH2/CH3 PWM。
-- `TIM1->CCR4=995` 设置 ADC 采样触发点。
+- `TIM1->CCR4=947` 设置 ADC 采样触发点。
 - `__HAL_TIM_ENABLE_IT(&htim1, TIM_IT_UPDATE)` 打开更新中断。
 - `MotorDriverProcess()` 根据 SVM 结果写 `TIM1->CCR1/CCR2/CCR3`。
 
@@ -83,7 +83,7 @@ SPI1 用于 TLE5012B 编码器：
 - 16-bit data。
 - CPOL low，CPHA second edge（SPI Mode 1）。
 - NSS software。
-- Prescaler 32，SCK 为 5.25 Mbit/s。
+- Prescaler 32，SCK 为 5.0 Mbit/s。
 - DMA2 Channel 1：SPI1_RX，normal、halfword、Very High priority，启用 TC/TE IRQ。
 - DMA2 Channel 2：SPI1_TX，normal、halfword、High priority，只启用 TE IRQ。
 
@@ -117,7 +117,7 @@ I2C1 有两种角色：
 
 FDCAN1 在业务初始化中使用 `user_fdcan_init()`：
 
-- Classic CAN frame。
+- CAN FD frame，发送时开启 BRS。
 - Extended ID。
 - Normal mode。
 - Auto retransmission disabled。
@@ -132,11 +132,16 @@ FDCAN1 在业务初始化中使用 `user_fdcan_init()`：
 | 1 | 2 | 500 Kbps |
 | 2 | 8 | 125 Kbps |
 
+FDCAN 使用 80 MHz PLLQ 时钟。`bps_index=0` 时仲裁段为 `1 + 63 + 16` TQ，
+对应 1 Mbps、80% 采样点、SJW 5；数据段为 `1 + 11 + 4` TQ，对应
+5 Mbps、75% 采样点、DSJW 3。其他 `bps_index` 只改变仲裁段预分频，
+数据段保持 5 Mbps。
+
 ## TIM3 + DMA
 
 TIM3 CH2 用于 SK6812/WS2812 LED：
 
-- Period：209。
+- Period：199（800 kHz）。
 - DMA1 Channel3，memory-to-peripheral，halfword。
 - `ws2812_show()` 将 GRB bit 展开成 PWM 占空比序列，并通过 `HAL_TIM_PWM_Start_DMA()` 发送。
 - `HAL_TIM_PWM_PulseFinishedCallback()` 停止 TIM3 CH2，确保发送结束后输出停止。

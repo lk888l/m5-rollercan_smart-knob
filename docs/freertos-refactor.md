@@ -107,7 +107,7 @@ ControlTask 不再直接修改 `currentloop_enable`、电流 PI 积分项、驱�
 
 ## DWT 运行时间指标
 
-STM32G431 当前为 168 MHz，因此周期值除以 168 即约为微秒：
+STM32G431 当前为 160 MHz，因此周期值除以 160 即约为微秒：
 
 | 变量 | 含义 | 参考边界 |
 | --- | --- | --- |
@@ -119,12 +119,12 @@ STM32G431 当前为 168 MHz，因此周期值除以 168 即约为微秒：
 | `runtime_encoder_dma_max_cycles` | 编码器 DMA 最大延迟 | 不应逼近 9000 cycles |
 | `runtime_tim1_isr_last/max_cycles` | TIM1 启动段 ISR 的最近/最大 CPU 活跃周期 | 应远低于完整 FOC 路径 |
 | `runtime_encoder_dma_isr_last/max_cycles` | DMA 完成、FOC 和兼容调度段 ISR 的最近/最大 CPU 活跃周期 | 最大值必须低于约 9000 cycles |
-| `runtime_control_last_cycles` | 最近一次控制步耗时 | 小于 168000 cycles |
+| `runtime_control_last_cycles` | 最近一次控制步耗时 | 小于 160000 cycles |
 | `runtime_control_max_cycles` | 控制步最大耗时 | 应保留 CAN/抢占余量 |
-| `runtime_control_period_min_cycles` | 1 kHz 控制起点最短周期 | 接近 168000 cycles |
-| `runtime_control_period_max_cycles` | 1 kHz 控制起点最长周期 | 接近 168000 cycles |
+| `runtime_control_period_min_cycles` | 1 kHz 控制起点最短周期 | 接近 160000 cycles |
+| `runtime_control_period_max_cycles` | 1 kHz 控制起点最长周期 | 接近 160000 cycles |
 | `runtime_control_jitter_max_cycles` | 相对 1 ms 的最大绝对周期偏差 | 越小越好 |
-| `runtime_can_frame_max_cycles` | 单帧 CAN 协议最大处理耗时 | 不应逼近 168000 cycles |
+| `runtime_can_frame_max_cycles` | 单帧 CAN 协议最大处理耗时 | 不应逼近 160000 cycles |
 | `runtime_can_bridge_max_cycles` | CommunicationTask 单条桥接最大耗时 | 可超过 1 ms，但不得影响控制 deadline |
 
 ## 控制周期重新离散化
@@ -160,7 +160,7 @@ TIM1 update IRQ 必须最后开启：`MotorDriverInit()`、`EncoderInit()`、DMA
 
 ### 编码器 DMA
 
-SPI1 保持 Mode 1、16-bit、5.25 Mbit/s。DMA2 RX/TX 均为 normal 模式，每周期搬运 `{0x8021, 0xFFFF}` 两个 halfword；循环 DMA 不满足 TLE5012B 的 CS 分帧要求。RX 通道启用 TC/TE，中断完成后等待 `BSY` 有界清零并拉高 CS；TX 通道只启用 TE，正常完成不会额外进入 ISR。两个 DMA2 IRQ 和 TIM1 update 均为优先级 0。它们都不能调用 FreeRTOS API，因此不存在编码器任务通知路径。
+SPI1 保持 Mode 1、16-bit、5.0 Mbit/s。DMA2 RX/TX 均为 normal 模式，每周期搬运 `{0x8021, 0xFFFF}` 两个 halfword；循环 DMA 不满足 TLE5012B 的 CS 分帧要求。RX 通道启用 TC/TE，中断完成后等待 `BSY` 有界清零并拉高 CS；TX 通道只启用 TE，正常完成不会额外进入 ISR。两个 DMA2 IRQ 和 TIM1 update 均为优先级 0。它们都不能调用 FreeRTOS API，因此不存在编码器任务通知路径。
 
 调试器可读取 `encoder_dma_start_count`、`encoder_dma_complete_count`、`encoder_dma_error_count`、`encoder_dma_overlap_count`、`encoder_dma_stale_sample_count`、`encoder_dma_unexpected_irq_count`、`fast_loop_late_start_count` 和 `fast_loop_sync_timeout_count`。错误、重叠、陈旧样本、意外 IRQ 和同步超时正常运行时都应保持 0；启动兼容外环可能让 late-start 增加一次，但不得持续增长。
 
@@ -195,9 +195,9 @@ I2C 从机 `Slave_Complete_Callback()` 仍会直接写控制状态，是明确�
 
 本阶段应使用 Release 固件验证：
 
-1. PB9 FOC 脉冲仍约为 18.67 kHz，脉宽表示 DMA 完成后的纯 FOC 计算段；逻辑分析仪同时确认 PA4 CS 内恰好有 32 个 5.25 MHz SCK。
+1. PB9 FOC 脉冲仍约为 18.67 kHz，脉宽表示 DMA 完成后的纯 FOC 计算段；逻辑分析仪同时确认 PA4 CS 内恰好有 32 个 5.0 MHz SCK。
 2. `app_control_step_count` 每秒约增加 1000，空闲和连续 CAN 下 `app_control_deadline_miss_count` 保持 0。
-3. `runtime_foc_max_cycles` 明显小于约 9000；`runtime_foc_cpu_*` 相比轮询基线每周期至少减少 450 cycles；`runtime_control_period_min/max_cycles` 围绕 168000。
+3. `runtime_foc_max_cycles` 明显小于约 9000；`runtime_foc_cpu_*` 相比轮询基线每周期至少减少 450 cycles；`runtime_control_period_min/max_cycles` 围绕 160000。
 4. 比较空闲、连续 CAN 和四种模式下的 `runtime_control_jitter_max_cycles`。
 5. `fast_sensor_read_failure_count` 保持 0；ADC DMA 持续更新，编码器 DMA 的 error/overlap/stale/unexpected 计数和 `encoder_spi_timeout_count` 均不增加。
 6. 连续 CAN 通信时四个 drop/loss 计数保持 0，三个 queue/FIFO high-water 不触顶。

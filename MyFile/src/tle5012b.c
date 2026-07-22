@@ -38,8 +38,8 @@ static volatile uint8_t encoder_dma_in_flight;
 
 static void EncoderCsHoldDelay(void)
 {
-  /* TLE5012B requires at least 105 ns CS hold time. At 168 MHz, 24
-     core cycles provide about 143 ns before CS is released. */
+  /* TLE5012B requires at least 105 ns CS hold time. At 160 MHz, 24
+     core cycles provide about 150 ns before CS is released. */
   __NOP(); __NOP(); __NOP(); __NOP(); __NOP(); __NOP();
   __NOP(); __NOP(); __NOP(); __NOP(); __NOP(); __NOP();
   __NOP(); __NOP(); __NOP(); __NOP(); __NOP(); __NOP();

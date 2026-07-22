@@ -15,7 +15,7 @@ ROLLERCAN 是一个基于 STM32G431 的无刷电机控制固件。工程由 STM3
 - 通过 TIM1 三相 PWM 和 ADC 采样运行 FOC 电流环。
 - 通过 TLE5012B SPI 编码器得到转子角度和机械位置。
 - 提供速度、位置、电流和 Dial/SmartKnob 四类运行模式。
-- 通过 I2C 从机寄存器协议和 CAN 扩展帧协议收发控制命令。
+- 通过 I2C 从机寄存器协议和 CAN FD 扩展 ID 帧协议收发控制命令。
 - 在 64x48 SSD1306 OLED 和 2 颗 SK6812/WS2812 灯珠上显示状态、菜单和告警。
 - 将 I2C 地址、CAN ID、通信模式、PID 参数和保护开关等配置保存到片内 Flash。
 
@@ -80,6 +80,29 @@ DMA2_Channel1_IRQHandler
   -> 提交本周期编码器角度
   -> Loop_FOC
 ```
+
+## CAN FD 总线配置
+
+默认 `bps_index=0` 时，固件 CAN 总线配置与以下命令精确一致：
+
+```bash
+sudo ip link set can0 type can bitrate 1000000 sample-point 0.8 dbitrate 5000000 dsample-point 0.75 sjw 5 dsjw 3 fd on
+```
+
+FDCAN 使用由 160 MHz 系统 PLL 分频得到的 80 MHz PLLQ 时钟。仲裁段预分频为
+1，位时间为 `1 + 63 + 16` TQ，SJW 为 5，精确得到 1 Mbit/s 和 80%
+采样点；数据段预分频为 1，位时间为 `1 + 11 + 4` TQ，DSJW 为 3，
+精确得到 5 Mbit/s 和 75% 采样点。协议发送帧为开启速率切换的 8 字节
+CAN FD 扩展 ID 帧。
+
+原有波特率选项仍然保留：`bps_index=1` 和 `bps_index=2` 只会将仲裁段
+分别改为 500 kbit/s 和 125 kbit/s，此时上位机 CAN 接口也必须使用相同
+仲裁速率；数据段仍保持 5 Mbit/s。
+
+PLL、FDCAN 位时序、TIM1 和 TIM3 参数也已写入 `ROLLERCAN.ioc`，因此使用
+STM32CubeMX 重新生成工程时会保留这些设置。系统时钟从 168 MHz 调整到
+160 MHz 后，使用 TIM1 周期 952 和 TIM3 周期 200 进行补偿：FOC 中断仍约为
+18.67 kHz，灯带数据率仍为 800 kHz；SPI1 现运行于 5.0 Mbit/s。
 
 ## 构建
 
