@@ -467,6 +467,26 @@ uint16_t GetMotorDriverEncCalOffset(void)
     return motor_driver_cal_encoder_offset;
 }
 
+void MotorDriverAbortEncoderCalibration(void)
+{
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    motor_driver_cal_flag = 0U;
+    motor_driver_cal_init = 0U;
+    motor_driver_cal_timer_count = 0U;
+    motor_driver_cal_busy = 0U;
+    iq_curr_pi_target = 0.0f;
+    id_curr_pi_target = 0.0f;
+    MotorDriverApplyModeFromISR(MDRV_MODE_OFF);
+    if (primask == 0U) {
+        __enable_irq();
+    }
+
+    FastControlPublishCurrentAdc(0.0f);
+    MotorDriverSetMode(MDRV_MODE_OFF);
+}
+
 //Set mode such as off/calibration  encoder/run1
 //  MDRV_MODE_OFF:          Release motor,Turn off all of the driver mosfets and reset current loop p-i values.
 //  MDRV_MODE_ENC_CAL:      Calibrate encoder by inject a 0 deg iq and read the encoder value, 

@@ -40,6 +40,8 @@ uint8_t IsMotorDriverEncCalBusy(void);
 
 uint16_t GetMotorDriverEncCalOffset(void);
 
+void MotorDriverAbortEncoderCalibration(void);
+
 void MotorDriverSetCurrentAdc(int32_t phase_current);
 
 void MotorDriverSetCurrentReal(float32_t phase_current);

@@ -54,6 +54,15 @@ uint32_t rgb_flash_color = 0;
 uint32_t rgb_flash_slow = 0;
 uint32_t rgb_flash_flag = 0;
 int32_t last_dial_counter = 0;
+static uint8_t calibration_menu_option = 0;
+static uint8_t calibration_menu_state = 0;
+static uint16_t calibration_menu_offset = 0;
+enum {
+    CALIBRATION_MENU_CONFIRM = 0,
+    CALIBRATION_MENU_SAVED,
+    CALIBRATION_MENU_SAVE_FAILED,
+    CALIBRATION_MENU_TIMEOUT
+};
 int cx=10; //x center
 int cy=24; //y center
 int radius=13; //radius
@@ -147,7 +156,7 @@ typedef struct
 key_table table[30]=
 {
 	//ç¬?å±?
-	{0,10,1,0,0,(*u8g2_disp_menu_0_1)},
+	{0,21,1,0,0,(*u8g2_disp_menu_0_1)},
 	{1,0,2,1,11,(*u8g2_disp_menu_0_2)},
 	{2,1,3,2,12,(*u8g2_disp_menu_0_3)},
 	{3,2,4,3,13,(*u8g2_disp_menu_0_4)},
@@ -157,7 +166,7 @@ key_table table[30]=
 	{7,6,8,7,17,(*u8g2_disp_menu_0_8)},
 	{8,7,9,8,18,(*u8g2_disp_menu_0_9)},
 	{9,8,10,9,19,(*u8g2_disp_menu_0_10)},
-	{10,9,0,10,20,(*u8g2_disp_menu_0_11)},
+	{10,9,21,10,20,(*u8g2_disp_menu_0_11)},
 	
   //ç¬?å±?
 	{11,11,11,1,11,(*u8g2_disp_menu_2_1)},					
@@ -168,8 +177,10 @@ key_table table[30]=
 	{16,16,16,6,16,(*u8g2_disp_menu_6_1)},						                	
 	{17,17,17,7,17,(*u8g2_disp_menu_7_1)},						                	
 	{18,18,18,8,18,(*u8g2_disp_menu_8_1)},						                	
-	{19,19,19,9,19,(*u8g2_disp_menu_9_1)},						                	
-	{20,20,20,10,20,(*u8g2_disp_menu_10_1)},						                									
+	{19,19,19,9,19,(*u8g2_disp_menu_9_1)},
+	{20,20,20,10,20,(*u8g2_disp_menu_10_1)},
+	{21,10,0,21,22,(*u8g2_disp_menu_0_12)},
+	{22,22,22,21,22,(*u8g2_disp_menu_calibration)},
 };
 
 static void u8g2_draw_warning_icon(u8g2_t *u8g2, uint8_t x, uint8_t y)
@@ -1473,6 +1484,33 @@ void u8g2_disp_menu_0_11(void)
     }       
 }
 
+void u8g2_disp_menu_0_12(void)
+{
+    u8g2_ClearBuffer(&u8g2);
+    u8g2_SetFont(&u8g2, u8g2_font_6x10_tr);
+
+    u8g2_DrawStr(&u8g2, 0, 12, "  RGB");
+    u8g2_DrawStr(&u8g2, 0, 24, "  JAM");
+    u8g2_DrawStr(&u8g2, 0, 36, "  RANGE");
+    u8g2_DrawStr(&u8g2, 0, 48, "> CAL");
+    u8g2_SendBuffer(&u8g2);
+    if (encoder_value_t.encoder_down) {
+        funIndex = table[funIndex].down;
+        encoder_value_t.encoder_down = 0;
+    }
+    if (encoder_value_t.encoder_up) {
+        funIndex = table[funIndex].up;
+        encoder_value_t.encoder_up = 0;
+    }
+    if (my_button.was_click) {
+        funIndex = table[funIndex].enter;
+        calibration_menu_option = 0U;
+        calibration_menu_state = CALIBRATION_MENU_CONFIRM;
+        last_btn_status = my_button.button_status;
+        my_button.was_click = 0;
+    }
+}
+
 void u8g2_disp_menu_0_5(void)
 {
     u8g2_ClearBuffer(&u8g2);
@@ -2377,6 +2415,121 @@ void u8g2_disp_menu_10_1(void)
         funIndex = table[funIndex].exit;        
         my_button.was_click = 0;
     }     
+}
+
+static void u8g2_disp_calibration_confirmation(void)
+{
+    u8g2_ClearBuffer(&u8g2);
+    u8g2_SetDrawColor(&u8g2, 1);
+    u8g2_SetFont(&u8g2, u8g2_font_6x10_tr);
+    u8g2_DrawStr(&u8g2, 16, 10, "<CAL>");
+    u8g2_SetFont(&u8g2, u8g2_font_5x8_tr);
+    u8g2_DrawStr(&u8g2, 5, 21, "MOTOR MOVES");
+    u8g2_DrawStr(&u8g2, 8, 34,
+                 calibration_menu_option == 0U ? "> CANCEL" : "  CANCEL");
+    u8g2_DrawStr(&u8g2, 8, 46,
+                 calibration_menu_option == 1U ? "> START" : "  START");
+    u8g2_SendBuffer(&u8g2);
+}
+
+static void u8g2_disp_calibration_progress(void)
+{
+    u8g2_ClearBuffer(&u8g2);
+    u8g2_SetDrawColor(&u8g2, 1);
+    u8g2_SetFont(&u8g2, u8g2_font_6x10_tr);
+    u8g2_DrawStr(&u8g2, 16, 10, "<CAL>");
+    u8g2_SetFont(&u8g2, u8g2_font_5x8_tr);
+    u8g2_DrawStr(&u8g2, 5, 22, "MOTOR MOVES");
+    u8g2_DrawStr(&u8g2, 2, 34, "DO NOT TOUCH");
+    u8g2_DrawStr(&u8g2, 17, 46, "WAIT...");
+    u8g2_SendBuffer(&u8g2);
+}
+
+static void u8g2_disp_calibration_result(void)
+{
+    char offset_buffer[16] = {0};
+
+    u8g2_ClearBuffer(&u8g2);
+    u8g2_SetDrawColor(&u8g2, 1);
+    u8g2_SetFont(&u8g2, u8g2_font_6x10_tr);
+    u8g2_DrawStr(&u8g2, 16, 10, "<CAL>");
+    u8g2_SetFont(&u8g2, u8g2_font_5x8_tr);
+    if (calibration_menu_state == CALIBRATION_MENU_TIMEOUT) {
+        u8g2_DrawStr(&u8g2, 12, 23, "TIMEOUT");
+        u8g2_DrawStr(&u8g2, 7, 34, "NOT SAVED");
+    } else {
+        snprintf(offset_buffer, sizeof(offset_buffer), "OFFSET %u",
+                 (unsigned int)calibration_menu_offset);
+        u8g2_DrawStr(&u8g2, 2, 23, offset_buffer);
+        u8g2_DrawStr(&u8g2, 12, 34,
+                     calibration_menu_state == CALIBRATION_MENU_SAVED
+                         ? "SAVED"
+                         : "SAVE FAIL");
+    }
+    u8g2_DrawStr(&u8g2, 5, 46, "CLICK BACK");
+    u8g2_SendBuffer(&u8g2);
+}
+
+static void u8g2_restore_menu_after_calibration(void)
+{
+    MotorDriverSetCurrentReal(0.0f);
+    motor_mode = MODE_DIAL;
+    init_smart_knob();
+    MotorDriverSetMode(MDRV_MODE_RUN);
+    last_dial_counter = current_position;
+    encoder_value_t.encoder_down = 0U;
+    encoder_value_t.encoder_up = 0U;
+}
+
+void u8g2_disp_menu_calibration(void)
+{
+    if (calibration_menu_state != CALIBRATION_MENU_CONFIRM) {
+        encoder_value_t.encoder_down = 0U;
+        encoder_value_t.encoder_up = 0U;
+        u8g2_disp_calibration_result();
+        if (my_button.was_click) {
+            my_button.was_click = 0U;
+            calibration_menu_option = 0U;
+            calibration_menu_state = CALIBRATION_MENU_CONFIRM;
+            last_dial_counter = current_position;
+            funIndex = table[funIndex].exit;
+        }
+        return;
+    }
+
+    if (encoder_value_t.encoder_down || encoder_value_t.encoder_up) {
+        calibration_menu_option = calibration_menu_option == 0U ? 1U : 0U;
+        encoder_value_t.encoder_down = 0U;
+        encoder_value_t.encoder_up = 0U;
+    }
+    u8g2_disp_calibration_confirmation();
+
+    if (!my_button.was_click) {
+        return;
+    }
+
+    my_button.was_click = 0U;
+    if (calibration_menu_option == 0U) {
+        calibration_menu_state = CALIBRATION_MENU_CONFIRM;
+        last_dial_counter = current_position;
+        funIndex = table[funIndex].exit;
+        return;
+    }
+
+    u8g2_disp_calibration_progress();
+    if (MysysCalibrateEncoder(3000U)) {
+        calibration_menu_offset = angle_cal_offset;
+        motor_mode = flash_data[1];
+        calibration_menu_state = flash_data_write_back()
+                                     ? CALIBRATION_MENU_SAVED
+                                     : CALIBRATION_MENU_SAVE_FAILED;
+    } else {
+        calibration_menu_state = CALIBRATION_MENU_TIMEOUT;
+    }
+
+    calibration_menu_option = 0U;
+    u8g2_restore_menu_after_calibration();
+    u8g2_disp_calibration_result();
 }
 
 void DrawPos(int x, int y, int r, int p, int v, int minVal, int maxVal) 

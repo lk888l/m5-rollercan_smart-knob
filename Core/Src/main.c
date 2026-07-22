@@ -207,7 +207,7 @@ void init_flash_data(void)
   last_motor_mode = motor_mode;
 }
 
-void flash_data_write_back(void)
+bool flash_data_write_back(void)
 {
   if (motor_mode == MODE_SPEED_ERR_PROTECT) {
     motor_mode = MODE_SPEED;
@@ -259,7 +259,7 @@ void flash_data_write_back(void)
   flash_data[34] = rgb_show_mode;
   flash_data[35] = motor_stall_protection_flag;
   flash_data[36] = motor_overvalue_protection_flag;
-  writeMessageToFlash(flash_data , FLASH_DATA_SIZE);  
+  return writeMessageToFlash(flash_data, FLASH_DATA_SIZE);
 }
 
 void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
