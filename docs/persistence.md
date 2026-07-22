@@ -72,9 +72,11 @@ Flash 读写在 `Core/Src/flash.c`：
 | CAN | `cmd_id=10` 设置 `flash_data_write_back_flag` |
 | CAN | `FUNC_SAVE_FLASH` 写非 0 |
 | CAN | CommunicationTask 完成 CAN ID/波特率重配置后设置延后写回标志 |
-| OLED 菜单 | 确认 COM、I2C ADDR、CAN ID、PID 组、BPS、RGB、JAM、RANGE 等设置 |
+| OLED 菜单 | 确认 COM、I2C ADDR、CAN ID、PID 组、BPS、RGB、JAM、RANGE 等设置，或在 CAL 中完成校准 |
 
 StorageTask 会检测 `flash_data_write_back_flag`，并在电机不处于 `SYS_RUNNING` 时写入，因此 CAN/CommunicationTask 不直接擦写 Flash。
+
+按键上电进入菜单前的临时编码器校准只更新 RAM 中的 `angle_cal_offset`，不会触发写回。只有用户在 `CAL` 项中二次确认并且校准成功后，固件才会在驱动关闭状态下保存 byte 2-3；写入函数返回底层擦写和逐字节校验结果，供菜单显示 `SAVED` 或 `SAVE FAIL`。
 
 ## 写入注意事项
 

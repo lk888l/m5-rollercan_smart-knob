@@ -207,7 +207,7 @@ void init_flash_data(void)
   last_motor_mode = motor_mode;
 }
 
-void flash_data_write_back(void)
+bool flash_data_write_back(void)
 {
   if (motor_mode == MODE_SPEED_ERR_PROTECT) {
     motor_mode = MODE_SPEED;
@@ -259,7 +259,7 @@ void flash_data_write_back(void)
   flash_data[34] = rgb_show_mode;
   flash_data[35] = motor_stall_protection_flag;
   flash_data[36] = motor_overvalue_protection_flag;
-  writeMessageToFlash(flash_data , FLASH_DATA_SIZE);  
+  return writeMessageToFlash(flash_data, FLASH_DATA_SIZE);
 }
 
 void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
@@ -943,9 +943,9 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
   RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV1;
-  RCC_OscInitStruct.PLL.PLLN = 21;
+  RCC_OscInitStruct.PLL.PLLN = 20;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-  RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
+  RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV4;
   RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {

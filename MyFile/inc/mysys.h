@@ -5,6 +5,7 @@
  */
 #ifndef __MYSYS_H__
 #define __MYSYS_H__
+#include <stdbool.h>
 #include "stm32g4xx.h"
 #include "pid_controller.h"
 
@@ -99,6 +100,7 @@ void InitMysys(void);
 void LoopMysys(void);
 void LoopMysysOnce(void);
 void MysysStorageOnce(void);
+bool MysysCalibrateEncoder(uint32_t timeout_ms);
 void MysysControlTaskBegin(void);
 void MysysControlStep(void);
 void MysysCycleMode(void);

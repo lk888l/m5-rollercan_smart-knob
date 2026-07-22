@@ -267,6 +267,30 @@ static void rebase_encoder_after_calibration(void)
   }
 }
 
+bool MysysCalibrateEncoder(uint32_t timeout_ms)
+{
+  const uint16_t previous_offset = angle_cal_offset;
+  const uint32_t start_ms = HAL_GetTick();
+
+  MotorDriverSetMode(MDRV_MODE_ENC_CAL);
+  while (IsMotorDriverEncCalBusy()) {
+    /* Calibration advances in the TIM1-triggered DMA2 RX fast-loop ISR. */
+    if ((timeout_ms != 0U) && ((HAL_GetTick() - start_ms) >= timeout_ms)) {
+      MotorDriverAbortEncoderCalibration();
+      angle_cal_offset = previous_offset;
+      MotorDriverSetAngleOffset(previous_offset);
+      return false;
+    }
+  }
+
+  angle_cal_offset = GetMotorDriverEncCalOffset();
+  MotorDriverSetAngleOffset(angle_cal_offset);
+  /* Let the FOC loop sample the encoder with the new offset first. */
+  HAL_Delay(5);
+  rebase_encoder_after_calibration();
+  return true;
+}
+
 void _sys_exit(int x){x = x;}
 
 void init_pid(void)
@@ -590,7 +614,7 @@ void InitMysys(void)
   GPIOB->BSRR=1<<1;//enable DRV8311 to enable intrlnal current sensor
 
 	MyADCInit();
-	TIM1->CCR4=995;//Enable TIM1 CH4 for ADC trigger
+	TIM1->CCR4=947;//Enable TIM1 CH4 for ADC trigger
 
 	/* Initialise every dependency used by the fast loop before TIM1 can enter it.
 	 * EncoderInit() prepares SPI1 plus both DMA2 channels; starting TIM1 earlier
@@ -645,15 +669,18 @@ void InitMysys(void)
      * the SmartKnob menu enables FOC.  Do not write Flash during the early
      * startup path: an interrupted power-up must never affect the next boot.
      */
-    MotorDriverSetMode(MDRV_MODE_ENC_CAL);
-    while (IsMotorDriverEncCalBusy()) {
-      /* Calibration advances in the TIM1-triggered DMA2 RX fast-loop ISR. */
+    if (!MysysCalibrateEncoder(3000U)) {
+      u8g2_ClearBuffer(&u8g2);
+      u8g2_SetFont(&u8g2, u8g2_font_6x10_tr);
+      u8g2_DrawStr(&u8g2, 16, 12, "<CAL>");
+      u8g2_SetFont(&u8g2, u8g2_font_5x8_tr);
+      u8g2_DrawStr(&u8g2, 12, 27, "TIMEOUT");
+      u8g2_DrawStr(&u8g2, 2, 41, "POWER CYCLE");
+      u8g2_SendBuffer(&u8g2);
+      while (1) {
+        /* The encoder reference is not trusted; keep the driver off. */
+      }
     }
-    angle_cal_offset = GetMotorDriverEncCalOffset();
-    MotorDriverSetAngleOffset(angle_cal_offset);
-    /* Let the FOC loop sample the encoder with the new offset first. */
-    HAL_Delay(5);
-    rebase_encoder_after_calibration();
     u8g2_disp_menu_init();
     u8g2_disp_menu_update();
   }  

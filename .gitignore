@@ -77,3 +77,4 @@ build/
 # codex
 .agents/
 .codex/
+.codex-diagnostics

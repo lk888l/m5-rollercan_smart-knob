@@ -22,7 +22,7 @@
 
 #define     LIMIT_UDC       24.0f
 #define     SQRT3           1.732050808f
-#define     TS              1000
+#define     TS              952
 #define     SQRT3_MULT_TS   (float32_t)((float32_t)TS * SQRT3)
 #define     LIMIT           (float32_t)(0.9f / SQRT3)
 #define     MOTOR_CURRENT_OUTPUT_DEADBAND_MA 60.0f
@@ -465,6 +465,26 @@ uint8_t IsMotorDriverEncCalBusy(void)
 uint16_t GetMotorDriverEncCalOffset(void)
 {
     return motor_driver_cal_encoder_offset;
+}
+
+void MotorDriverAbortEncoderCalibration(void)
+{
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    motor_driver_cal_flag = 0U;
+    motor_driver_cal_init = 0U;
+    motor_driver_cal_timer_count = 0U;
+    motor_driver_cal_busy = 0U;
+    iq_curr_pi_target = 0.0f;
+    id_curr_pi_target = 0.0f;
+    MotorDriverApplyModeFromISR(MDRV_MODE_OFF);
+    if (primask == 0U) {
+        __enable_irq();
+    }
+
+    FastControlPublishCurrentAdc(0.0f);
+    MotorDriverSetMode(MDRV_MODE_OFF);
 }
 
 //Set mode such as off/calibration  encoder/run1

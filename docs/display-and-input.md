@@ -69,7 +69,7 @@ OLED 由 `MyFile/src/oled_u8g2.c` 和 `MyFile/src/u8g2_disp_fun.c` 驱动。
 
 ## 配置菜单
 
-开机时按住 `SYS_SW`，`InitMysys()` 会进入 `u8g2_disp_menu_init()` 和 `u8g2_disp_menu_update()`。
+开机时按住 `SYS_SW`，`InitMysys()` 会先执行一次不写 Flash 的临时编码器校准，再进入 `u8g2_disp_menu_init()` 和 `u8g2_disp_menu_update()`。临时校准用于保证更换编码器后仍能安全使用旋钮菜单；若 3 秒内没有完成，驱动保持关闭并显示重新上电提示。
 
 菜单运行特点：
 
@@ -94,8 +94,11 @@ OLED 由 `MyFile/src/oled_u8g2.c` 和 `MyFile/src/u8g2_disp_fun.c` 驱动。
 | RGB | `u8g2_disp_menu_8_1()` | 系统默认/用户自定义 RGB |
 | JAM | `u8g2_disp_menu_9_1()` | 堵转保护开关 |
 | RANGE | `u8g2_disp_menu_10_1()` | 位置越界保护开关 |
+| CAL | `u8g2_disp_menu_calibration()` | 二次确认后重新校准编码器并保存 offset |
 
 确认菜单设置时，代码会短暂恢复 `flash_data[1]` 的电机模式并调用 `flash_data_write_back()`，再重新进入 Dial 菜单模式。
+
+`CAL` 默认选中 `Cancel`。选择 `Start` 后会先显示电机转动警告，再运行校准；成功时显示新 offset 和 `SAVED`，Flash 校验失败显示 `SAVE FAIL`，超时则显示 `TIMEOUT` 且不保存。结果页单击后返回 `CAL` 菜单项。
 
 ## RGB 灯效
 

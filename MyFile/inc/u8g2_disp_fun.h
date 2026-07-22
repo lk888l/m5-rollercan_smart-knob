@@ -93,7 +93,9 @@ void u8g2_disp_menu_8_1(void);
 void u8g2_disp_menu_0_9(void);
 void u8g2_disp_menu_0_10(void);
 void u8g2_disp_menu_0_11(void);
+void u8g2_disp_menu_0_12(void);
 void u8g2_disp_menu_9_1(void);
 void u8g2_disp_menu_10_1(void);
+void u8g2_disp_menu_calibration(void);
 
 #endif

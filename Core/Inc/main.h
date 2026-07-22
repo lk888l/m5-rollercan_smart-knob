@@ -44,6 +44,7 @@ extern "C" {
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "arm_const_structs.h"
+#include <stdbool.h>
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/
@@ -74,7 +75,7 @@ extern uint8_t motor_disable_flag;
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-void flash_data_write_back(void);
+bool flash_data_write_back(void);
 void init_flash_data(void);
 uint32_t micros(void);
 /* USER CODE END EFP */
