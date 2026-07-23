@@ -17,7 +17,7 @@ ROLLERCAN 是一个基于 STM32G431 的无刷电机控制固件。工程由 STM3
 - 提供速度、位置、电流和 Dial/SmartKnob 四类运行模式。
 - 通过 I2C 从机寄存器协议和 CAN FD 扩展 ID 帧协议收发控制命令。
 - 在 64x48 SSD1306 OLED 和 2 颗 SK6812/WS2812 灯珠上显示状态、菜单和告警。
-- 将 I2C 地址、CAN ID、通信模式、PID 参数和保护开关等配置保存到片内 Flash。
+- 将编码器校准 offset、I2C 地址、CAN ID、通信模式、PID 参数和保护开关等配置保存到片内 Flash。
 
 ## 快速入口
 
@@ -31,8 +31,8 @@ ROLLERCAN 是一个基于 STM32G431 的无刷电机控制固件。工程由 STM3
 | [控制链路](docs/control-loop.md) | FOC、电流环、速度环、位置环、电流模式、Dial 模式 |
 | [固件 SmartKnob](docs/smartknob-firmware.md) | 模块化模式、默认预设、CAN 在线配置和主动遥测 |
 | [通信协议](docs/communication-protocol.md) | I2C 寄存器表、CAN 命令、CAN-I2C 桥接 |
-| [显示与输入](docs/display-and-input.md) | OLED 页面、菜单、按键、灯效 |
-| [持久化配置](docs/persistence.md) | Flash 数据布局、读写时机、保护状态保存 |
+| [显示与输入](docs/display-and-input.md) | OLED 页面、菜单、按键、灯效和本地编码器校准流程 |
+| [持久化配置](docs/persistence.md) | Flash 数据布局、编码器 offset 保存、读写时机、保护状态保存 |
 | [模块参考](docs/module-reference.md) | 每个源文件/模块的职责和运行方式 |
 | [维护注意事项](docs/maintenance-notes.md) | CubeMX 再生成、U8g2 裁剪、调试建议 |
 
@@ -67,6 +67,9 @@ STM32G431XX_FLASH.ld  CubeMX 生成的默认链接脚本，CMake 不使用
   -> MX_GPIO/MX_DMA/MX_ADC/MX_TIM/MX_SPI/MX_I2C/MX_FDCAN
   -> InitMysys
        -> ADC DMA / TIM1 PWM / 电机驱动 / 编码器 / Flash 配置 / OLED / 通信
+       -> 是否按住 SYS_SW 上电？
+            -> 临时编码器校准（仅 RAM）
+            -> 本地设置菜单；CAL 可重新校准并保存
   -> App_StartScheduler
        -> ControlTask: 1 kHz 外环、保护、SmartKnob 和本机命令执行
        -> CommunicationTask: FDCAN RX/TX、帧解码和 CAN-I2C 桥接
@@ -80,6 +83,30 @@ DMA2_Channel1_IRQHandler
   -> 提交本周期编码器角度
   -> Loop_FOC
 ```
+
+## 本地设置与编码器校准
+
+本地设置菜单在 FreeRTOS 启动前运行，操作步骤如下：
+
+1. 关闭设备电源，确认输出轴空载且能够自由转动。
+2. 按住 `SYS_SW` 的同时给设备上电。
+3. 进入菜单前，固件会先执行一次临时编码器校准，以确保更换编码器后仍能使用 SmartKnob 导航菜单。该次校准只更新 RAM，不写入 Flash。
+4. 旋转菜单越过 `RANGE` 找到 `CAL`，单击进入。
+5. 确认页默认选中 `Cancel`；旋转到 `Start`，再次单击才会正式开始校准。
+6. 校准期间屏幕依次显示 `MOTOR MOVES`、`DO NOT TOUCH` 和 `WAIT...`。
+7. 校准结束后，单击结果页返回 `CAL`，再正常退出设置菜单。
+
+编码器对齐期间，电机会以约 1.2 A 驱动约 1.5 秒。操作时不要触碰输出轴，并确保连接机构不会阻碍转动。进入菜单前的临时校准和菜单内的显式 `CAL` 操作都带有 3 秒超时；超时会清零电流目标并关闭驱动。
+
+显式 `CAL` 只会在校准成功后应用新 offset 并尝试写入 Flash。结果页含义如下：
+
+| 结果 | 含义 |
+| --- | --- |
+| `SAVED` | 新 offset 已写入并校验，下次上电会自动加载 |
+| `SAVE FAIL` | 新 offset 本次运行仍然生效，但 Flash 保存未确认；依赖该结果前应重新校准 |
+| `TIMEOUT` / `NOT SAVED` | 校准未完成，继续使用原 offset，且不会写 Flash |
+
+如果进入菜单前的临时校准超时，固件会保持驱动关闭并显示 `POWER CYCLE`，不会继续进入菜单。正常上电且未按住 `SYS_SW` 时不会运行这条本地校准路径，而是直接加载 Flash 中已保存的 offset。
 
 ## CAN FD 总线配置
 
@@ -123,7 +150,7 @@ cmake --build build\Debug
 | --- | --- | --- |
 | Flash 启动区 | `0x08000000..0x08001FFF` | 预留 8 KiB，供原版 bootloader/启动入口使用 |
 | Flash 应用区 | `0x08002000..0x0801D7FF` | ROLLERCAN 应用，长度 `0x1B800`（110 KiB） |
-| Flash 配置页 | `0x0801D800..0x0801DFFF` | 持久化设置，应用链接器不会放置代码到这里 |
+| Flash 配置页 | `0x0801D800..0x0801DFFF` | 持久化设置，包括编码器校准 offset；应用链接器不会放置代码到这里 |
 | RAM 保留区 | `0x20000000..0x200000BF` | 预留 `0xC0` 字节，兼容原版启动交接数据 |
 | RAM 应用区 | `0x200000C0..0x20007FFF` | 应用实际使用的 RAM |
 

@@ -15,7 +15,7 @@ The firmware's core responsibilities are:
 - Providing four operating modes: speed, position, current, and Dial/SmartKnob.
 - Sending and receiving control commands through an I2C slave register protocol and a CAN FD extended-ID protocol.
 - Displaying status, menus, and alerts on a 64x48 SSD1306 OLED and two SK6812/WS2812 LEDs.
-- Saving settings such as the I2C address, CAN ID, communication mode, PID parameters, and protection switches to internal Flash.
+- Saving settings such as the encoder calibration offset, I2C address, CAN ID, communication mode, PID parameters, and protection switches to internal Flash.
 
 ## Quick Links
 
@@ -29,8 +29,8 @@ The firmware's core responsibilities are:
 | [Control Path](docs/control-loop.md) | FOC, current loop, speed loop, position loop, current mode, and Dial mode |
 | [Firmware SmartKnob](docs/smartknob-firmware.md) | Modular modes, default presets, online CAN configuration, and active telemetry |
 | [Communication Protocol](docs/communication-protocol.md) | I2C register table, CAN commands, and the CAN-I2C bridge |
-| [Display and Input](docs/display-and-input.md) | OLED pages, menus, buttons, and lighting effects |
-| [Persistent Configuration](docs/persistence.md) | Flash data layout, read/write timing, and protection-state storage |
+| [Display and Input](docs/display-and-input.md) | OLED pages, menus, buttons, lighting effects, and the local encoder calibration workflow |
+| [Persistent Configuration](docs/persistence.md) | Flash data layout, encoder offset storage, read/write timing, and protection-state storage |
 | [Module Reference](docs/module-reference.md) | Responsibilities and runtime behavior of each source file/module |
 | [Maintenance Notes](docs/maintenance-notes.md) | CubeMX regeneration, U8g2 trimming, and debugging recommendations |
 
@@ -65,6 +65,9 @@ Power-on
   -> MX_GPIO/MX_DMA/MX_ADC/MX_TIM/MX_SPI/MX_I2C/MX_FDCAN
   -> InitMysys
        -> ADC DMA / TIM1 PWM / motor driver / encoder / Flash settings / OLED / communication
+       -> SYS_SW held at power-on?
+            -> Temporary encoder calibration (RAM only)
+            -> Local settings menu; CAL can recalibrate and save
   -> App_StartScheduler
        -> ControlTask: 1 kHz outer loops, protection, SmartKnob, and local command execution
        -> CommunicationTask: FDCAN RX/TX, frame decoding, and CAN-I2C bridge
@@ -78,6 +81,30 @@ DMA2_Channel1_IRQHandler
   -> Submit the encoder angle for the current cycle
   -> Loop_FOC
 ```
+
+## Local Settings and Encoder Calibration
+
+The local settings menu is available before FreeRTOS starts:
+
+1. Power the device off and make sure the output shaft is unloaded and can rotate freely.
+2. Hold `SYS_SW` while powering the device on.
+3. Before opening the menu, the firmware performs a temporary encoder calibration so that a replacement encoder can still be used to navigate the SmartKnob menu. This calibration updates RAM only and does not write Flash.
+4. Rotate through the menu past `RANGE` to `CAL`, then click to enter.
+5. `Cancel` is selected by default. Rotate to `Start` and click again to explicitly confirm calibration.
+6. The display shows `MOTOR MOVES`, `DO NOT TOUCH`, and `WAIT...` while calibration is running.
+7. After completion, click the result page to return to `CAL`, then leave the settings menu normally.
+
+Encoder alignment drives the motor at approximately 1.2 A for about 1.5 seconds. Keep hands and attached mechanisms clear during this operation. Both the temporary startup calibration and the explicit `CAL` operation have a 3-second timeout; a timeout clears the current target and disables the driver.
+
+The explicit `CAL` operation applies the new offset immediately and writes it to Flash only after calibration succeeds. The result page reports:
+
+| Result | Meaning |
+| --- | --- |
+| `SAVED` | The new offset was written and verified; it will be loaded on the next boot |
+| `SAVE FAIL` | The new offset remains active for the current session but was not confirmed in Flash; retry calibration before relying on it |
+| `TIMEOUT` / `NOT SAVED` | Calibration did not finish, the previous offset remains active, and Flash was not written |
+
+If the temporary calibration before the menu times out, the firmware keeps the driver off and displays `POWER CYCLE` instead of entering the menu. Normal power-on without holding `SYS_SW` does not run this local calibration path; it loads the offset already stored in Flash.
 
 ## CAN FD Bus Configuration
 
@@ -124,7 +151,7 @@ To remain compatible with the startup layout of the original firmware, the CMake
 | --- | --- | --- |
 | Flash boot region | `0x08000000..0x08001FFF` | Reserves 8 KiB for the original bootloader/startup entry point |
 | Flash application region | `0x08002000..0x0801D7FF` | ROLLERCAN application, length `0x1B800` (110 KiB) |
-| Flash configuration page | `0x0801D800..0x0801DFFF` | Persistent settings; the application linker does not place code here |
+| Flash configuration page | `0x0801D800..0x0801DFFF` | Persistent settings, including the encoder calibration offset; the application linker does not place code here |
 | Reserved RAM region | `0x20000000..0x200000BF` | Reserves `0xC0` bytes for compatibility with the original startup handoff data |
 | Application RAM region | `0x200000C0..0x20007FFF` | RAM actually used by the application |
 
