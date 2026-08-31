@@ -3,14 +3,16 @@
  *
  * SPDX-License-Identifier: MIT
  */
-#ifndef __GPIO_H__
-#define __GPIO_H__
+#ifndef __BUTTON_H__
+#define __BUTTON_H__
 
 #include "main.h"
-#include "gpio.h"
 
-#define BUTTON_FILTER 500
-#define BUTTON_FILTER_TIMEROUT BUTTON_FILTER*3
+#define BUTTON_DEBOUNCE_MS 20U
+#define BUTTON_MIN_CLICK_MS 30U
+#define BUTTON_DOUBLE_CLICK_MS 350U
+#define BUTTON_LONG_PRESS_MS 1200U
+#define BUTTON_LONG_LONG_PRESS_MS 5000U
 
 typedef struct
 {
@@ -19,6 +21,7 @@ typedef struct
     uint8_t is_pressed;
     uint8_t is_longlongpressed;
     uint8_t was_click;
+    uint8_t was_double_click;
     uint8_t was_longpress;
     uint8_t was_longlongpress;
 } button_t;

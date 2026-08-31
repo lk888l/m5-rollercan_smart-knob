@@ -262,6 +262,72 @@ static void test_exact_center_still_commands_exact_zero(void)
     }
 }
 
+static void test_local_profile_applies_and_resets_preset_tuning(void)
+{
+    static const char test_name[] = "local_profile_applies_and_resets_preset_tuning";
+    require_true(test_name,
+                 smart_knob_mode_apply_local_profile(
+                     SMART_KNOB_MODE_COARSE_STRONG, 50U, 250U, 12U),
+                 "local profile must accept a valid preset");
+
+    const SmartKnobModeConfig *mode =
+        smart_knob_mode_get(SMART_KNOB_MODE_COARSE_STRONG);
+    require_true(test_name, mode != NULL, "profiled mode must exist");
+    if (fabsf(mode->tuning.current_scale_a - 0.1f) > 0.0001f) {
+        failf(test_name, "force must scale the preset current gain",
+              mode->tuning.current_scale_a, 0.1f);
+    }
+    if (fabsf(mode->tuning.current_limit_a - 0.25f) > 0.0001f) {
+        failf(test_name, "current limit must use milliamps",
+              mode->tuning.current_limit_a, 0.25f);
+    }
+    const float width_deg = mode->config.position_width_radians * 180.0f / PI;
+    if (fabsf(width_deg - 12.0f) > 0.01f) {
+        failf(test_name, "menu step width must be applied in degrees",
+              width_deg, 12.0f);
+    }
+
+    require_true(test_name,
+                 smart_knob_mode_apply_local_profile(
+                     SMART_KNOB_MODE_COARSE_STRONG, 100U, 450U, 8U),
+                 "second profile application must succeed");
+    mode = smart_knob_mode_get(SMART_KNOB_MODE_COARSE_STRONG);
+    if (fabsf(mode->tuning.current_scale_a - 0.2f) > 0.0001f) {
+        failf(test_name, "reapplying a profile must start from preset defaults",
+              mode->tuning.current_scale_a, 0.2f);
+    }
+    require_true(test_name,
+                 smart_knob_mode_default_width_deg(
+                     SMART_KNOB_MODE_COARSE_STRONG) == 8U,
+                 "coarse preset default width must round to eight degrees");
+}
+
+static void test_navigation_mode_is_private_and_reversible(void)
+{
+    static const char test_name[] = "navigation_mode_is_private_and_reversible";
+    reset_controller(SMART_KNOB_MODE_COARSE_STRONG);
+    smart_knob_enter_navigation_mode();
+
+    SmartKnobRuntimeState state = runtime_state(test_name);
+    require_true(test_name,
+                 state.active_mode == SMART_KNOB_NAVIGATION_MODE,
+                 "menu must expose the private navigation mode at runtime");
+    require_true(test_name,
+                 smart_knob_active_config() != NULL,
+                 "navigation mode must provide a valid haptic config");
+    require_true(test_name,
+                 smart_knob_modes_count() == SMART_KNOB_MODE_COUNT,
+                 "navigation mode must not be added to the user preset list");
+
+    require_true(test_name,
+                 smart_knob_select_mode(SMART_KNOB_MODE_COARSE_STRONG),
+                 "leaving the menu must restore a user preset");
+    state = runtime_state(test_name);
+    require_true(test_name,
+                 state.active_mode == SMART_KNOB_MODE_COARSE_STRONG,
+                 "restored preset must replace navigation mode");
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) {
@@ -275,6 +341,10 @@ int main(int argc, char **argv)
         test_bounded_coarse_idle_does_not_move_detent_center();
     } else if (strcmp(argv[1], "exact-center-zero") == 0) {
         test_exact_center_still_commands_exact_zero();
+    } else if (strcmp(argv[1], "local-profile") == 0) {
+        test_local_profile_applies_and_resets_preset_tuning();
+    } else if (strcmp(argv[1], "navigation-mode") == 0) {
+        test_navigation_mode_is_private_and_reversible();
     } else {
         fprintf(stderr, "unknown test case: %s\n", argv[1]);
         return EXIT_FAILURE;

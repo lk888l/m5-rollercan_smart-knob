@@ -39,3 +39,52 @@ add_test(
     NAME exact_center_commands_zero
     COMMAND smart_knob_regression_tests exact-center-zero
 )
+
+add_test(
+    NAME local_profile_applies_from_preset_defaults
+    COMMAND smart_knob_regression_tests local-profile
+)
+
+add_test(
+    NAME menu_navigation_mode_is_private
+    COMMAND smart_knob_regression_tests navigation-mode
+)
+
+add_executable(button_event_tests
+    button_event_tests.c
+    ../MyFile/src/button.c
+)
+
+target_compile_features(button_event_tests PRIVATE c_std_11)
+target_include_directories(button_event_tests PRIVATE
+    stubs
+    ../MyFile/inc
+)
+
+if(MSVC)
+    target_compile_options(button_event_tests PRIVATE /W4)
+else()
+    target_compile_options(button_event_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_test(NAME button_double_click COMMAND button_event_tests double-click)
+add_test(NAME button_long_press COMMAND button_event_tests long-press)
+
+add_executable(local_rgb_state_tests
+    local_rgb_state_tests.c
+    ../MyFile/src/local_rgb.c
+)
+
+target_compile_features(local_rgb_state_tests PRIVATE c_std_11)
+target_include_directories(local_rgb_state_tests PRIVATE
+    stubs
+    ../MyFile/inc
+)
+
+if(MSVC)
+    target_compile_options(local_rgb_state_tests PRIVATE /W4)
+else()
+    target_compile_options(local_rgb_state_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_test(NAME local_rgb_state_machine COMMAND local_rgb_state_tests)

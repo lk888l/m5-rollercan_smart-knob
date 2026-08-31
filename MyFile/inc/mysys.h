@@ -104,6 +104,11 @@ bool MysysCalibrateEncoder(uint32_t timeout_ms);
 void MysysControlTaskBegin(void);
 void MysysControlStep(void);
 void MysysCycleMode(void);
+void MysysLocalMenuEnter(void);
+void MysysLocalMenuExit(uint32_t packed_profile);
+void MysysLocalToggleOutput(void);
+uint32_t MysysLocalProfilePacked(void);
+uint8_t MysysLocalSavePending(void);
 void MysysFastLoopISR(void);
 void MysysFastLoopOnEncoderSampleFromISR(uint8_t fresh_sample,
                                          uint32_t irq_start_cycles);

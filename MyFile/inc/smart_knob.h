@@ -21,6 +21,7 @@ extern "C" {
 #define SMART_KNOB_TELEMETRY_COMMAND_ID 0x17U
 #define SMART_KNOB_TELEMETRY_STATE_TYPE 0x01U
 #define SMART_KNOB_TELEMETRY_MOTION_TYPE 0x02U
+#define SMART_KNOB_NAVIGATION_MODE 0xFFU
 
 typedef uint_least16_t pb_size_t;
 
@@ -119,6 +120,7 @@ void handle_smart_knob(void);
 void smart_knob_set_update_rate(float update_rate_hz);
 
 bool smart_knob_select_mode(uint8_t mode_index);
+void smart_knob_enter_navigation_mode(void);
 uint8_t smart_knob_active_mode(void);
 const SmartKnobModeConfig *smart_knob_active_config(void);
 

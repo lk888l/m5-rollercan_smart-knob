@@ -121,3 +121,54 @@ SmartKnobModeConfig *smart_knob_mode_get_mutable(uint8_t mode_index)
 {
     return (SmartKnobModeConfig *)smart_knob_mode_get(mode_index);
 }
+
+bool smart_knob_mode_apply_local_profile(uint8_t mode_index,
+                                         uint8_t force_percent,
+                                         uint16_t current_limit_ma,
+                                         uint8_t step_width_deg)
+{
+    smart_knob_modes_initialize();
+    if (mode_index >= SMART_KNOB_MODE_COUNT) {
+        return false;
+    }
+
+    if (force_percent < 25U) {
+        force_percent = 25U;
+    } else if (force_percent > 125U) {
+        force_percent = 125U;
+    }
+    if (current_limit_ma < 100U) {
+        current_limit_ma = 100U;
+    } else if (current_limit_ma > 450U) {
+        current_limit_ma = 450U;
+    }
+    if (step_width_deg < 1U) {
+        step_width_deg = 1U;
+    } else if (step_width_deg > 60U) {
+        step_width_deg = 60U;
+    }
+
+    modes[mode_index] = default_modes[mode_index];
+    modes[mode_index].tuning.current_scale_a *=
+        (float)force_percent / 100.0f;
+    modes[mode_index].tuning.current_limit_a =
+        (float)current_limit_ma / 1000.0f;
+    modes[mode_index].config.position_width_radians =
+        DEG_TO_RAD((float)step_width_deg);
+    return true;
+}
+
+uint8_t smart_knob_mode_default_width_deg(uint8_t mode_index)
+{
+    if (mode_index >= SMART_KNOB_MODE_COUNT) {
+        mode_index = (uint8_t)SMART_KNOB_DEFAULT_MODE;
+    }
+    float width_deg = default_modes[mode_index].config.position_width_radians *
+                      180.0f / PI;
+    if (width_deg < 1.0f) {
+        width_deg = 1.0f;
+    } else if (width_deg > 60.0f) {
+        width_deg = 60.0f;
+    }
+    return (uint8_t)(width_deg + 0.5f);
+}

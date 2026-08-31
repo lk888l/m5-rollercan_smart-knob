@@ -8,6 +8,7 @@
 #include "main.h"
 #include "mysys.h"
 #include "runtime_metrics.h"
+#include "u8g2_disp_fun.h"
 
 namespace {
 
@@ -78,6 +79,15 @@ void ApplyControlCommand(const ControlCommand &command)
     switch (command.type) {
     case APP_CONTROL_COMMAND_CYCLE_MODE:
         MysysCycleMode();
+        break;
+    case APP_CONTROL_COMMAND_LOCAL_MENU_ENTER:
+        MysysLocalMenuEnter();
+        break;
+    case APP_CONTROL_COMMAND_LOCAL_MENU_EXIT:
+        MysysLocalMenuExit(static_cast<uint32_t>(command.value));
+        break;
+    case APP_CONTROL_COMMAND_LOCAL_TOGGLE_OUTPUT:
+        MysysLocalToggleOutput();
         break;
     case APP_CONTROL_COMMAND_CAN_PROTOCOL: {
         CanProtocolResponse response{};
@@ -292,13 +302,17 @@ extern "C" void App_StartScheduler(void)
                                        kControlPriority,
                                        control_stack,
                                        &control_tcb);
-    communication_handle = xTaskCreateStatic(CommunicationTask,
-                                             "Communication",
-                                             static_cast<uint32_t>(sizeof(communication_stack) / sizeof(communication_stack[0])),
-                                             nullptr,
-                                             kCommunicationPriority,
-                                             communication_stack,
-                                             &communication_tcb);
+    if (comm_type != COMM_TYPE_NONE) {
+        communication_handle = xTaskCreateStatic(
+            CommunicationTask,
+            "Communication",
+            static_cast<uint32_t>(sizeof(communication_stack) /
+                                  sizeof(communication_stack[0])),
+            nullptr,
+            kCommunicationPriority,
+            communication_stack,
+            &communication_tcb);
+    }
     storage_handle = xTaskCreateStatic(StorageTask,
                                        "Storage",
                                        static_cast<uint32_t>(sizeof(storage_stack) / sizeof(storage_stack[0])),
@@ -311,7 +325,7 @@ extern "C" void App_StartScheduler(void)
     configASSERT(can_response_queue != nullptr);
     configASSERT(maintenance_handle != nullptr);
     configASSERT(control_handle != nullptr);
-    configASSERT(communication_handle != nullptr);
+    configASSERT(comm_type == COMM_TYPE_NONE || communication_handle != nullptr);
     configASSERT(storage_handle != nullptr);
 
     RuntimeMetricsInit();

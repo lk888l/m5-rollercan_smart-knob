@@ -24,6 +24,9 @@
 #include <string.h>
 #include "pid_controller.h"
 #include "smart_knob.h"
+#include "smart_knob_modes.h"
+#include "local_ui.h"
+#include "local_rgb.h"
 #include "arm_math.h"
 #include "fdcan.h"
 #include "app_rtos.h"
@@ -178,8 +181,26 @@ uint32_t lastest_rgb_color = 0;
 #define OVER_VOLTAGE_RELEASE_CENTIVOLTS 1750.0f
 #define OVER_VOLTAGE_RESTART_DELAY_MS 300U
 #define FAST_LOOP_MIN_START_MARGIN_TIM1_TICKS 640U
-#define FLASH_DEFAULTS_VERSION_INDEX (FLASH_DATA_SIZE - 1U)
-#define FLASH_DEFAULTS_CAN_V1 0xC1U
+#define LOCAL_PROFILE_MAGIC_INDEX 37U
+#define LOCAL_PROFILE_VERSION_INDEX 38U
+#define LOCAL_PROFILE_MODE_INDEX 39U
+#define LOCAL_PROFILE_FORCE_INDEX 40U
+#define LOCAL_PROFILE_LIMIT_INDEX 41U
+#define LOCAL_PROFILE_WIDTH_INDEX 42U
+#define LOCAL_PROFILE_CHECKSUM_INDEX 43U
+#define LOCAL_PROFILE_MARKER_INDEX (FLASH_DATA_SIZE - 1U)
+#define LOCAL_PROFILE_MAGIC 0x4CU
+#define LOCAL_PROFILE_VERSION 1U
+#define LOCAL_PROFILE_MARKER 0xD1U
+#define LOCAL_PROFILE_DEFAULT_FORCE 100U
+#define LOCAL_PROFILE_DEFAULT_LIMIT_10MA 45U
+
+typedef struct {
+  uint8_t mode;
+  uint8_t force_percent;
+  uint8_t current_limit_10ma;
+  uint8_t step_width_deg;
+} MysysLocalProfile;
 
 static volatile uint8_t control_task_active = 0;
 static float control_filter_alpha =
@@ -192,10 +213,189 @@ static FastSensorSnapshot control_sensor_snapshot;
 static volatile uint8_t fast_cycle_pending = 0U;
 static uint32_t fast_cycle_start_cycles = 0U;
 static uint32_t fast_cycle_start_active_cycles = 0U;
+static volatile uint32_t local_profile_packed;
+static uint8_t local_menu_restore_output;
+static uint8_t local_resume_after_storage;
+static uint8_t local_save_pending;
 volatile uint32_t fast_loop_late_start_count;
 volatile uint32_t fast_loop_sync_timeout_count;
 
 void Rpm_Count_100us(void);
+
+static uint8_t local_profile_checksum(const MysysLocalProfile *profile)
+{
+  return (uint8_t)(0xA5U ^ profile->mode ^ profile->force_percent ^
+                   profile->current_limit_10ma ^ profile->step_width_deg);
+}
+
+static uint32_t local_profile_pack(const MysysLocalProfile *profile)
+{
+  return (uint32_t)profile->mode |
+         ((uint32_t)profile->force_percent << 8) |
+         ((uint32_t)profile->current_limit_10ma << 16) |
+         ((uint32_t)profile->step_width_deg << 24);
+}
+
+static MysysLocalProfile local_profile_unpack(uint32_t packed)
+{
+  MysysLocalProfile profile;
+  profile.mode = (uint8_t)packed;
+  profile.force_percent = (uint8_t)(packed >> 8);
+  profile.current_limit_10ma = (uint8_t)(packed >> 16);
+  profile.step_width_deg = (uint8_t)(packed >> 24);
+  return profile;
+}
+
+static uint8_t local_profile_valid(const MysysLocalProfile *profile)
+{
+  return profile->mode < smart_knob_modes_count() &&
+         profile->force_percent >= 25U && profile->force_percent <= 125U &&
+         profile->current_limit_10ma >= 10U &&
+         profile->current_limit_10ma <= 45U &&
+         profile->step_width_deg >= 1U && profile->step_width_deg <= 60U;
+}
+
+static void local_profile_stage_for_flash(const MysysLocalProfile *profile)
+{
+  flash_data[LOCAL_PROFILE_MAGIC_INDEX] = LOCAL_PROFILE_MAGIC;
+  flash_data[LOCAL_PROFILE_VERSION_INDEX] = LOCAL_PROFILE_VERSION;
+  flash_data[LOCAL_PROFILE_MODE_INDEX] = profile->mode;
+  flash_data[LOCAL_PROFILE_FORCE_INDEX] = profile->force_percent;
+  flash_data[LOCAL_PROFILE_LIMIT_INDEX] = profile->current_limit_10ma;
+  flash_data[LOCAL_PROFILE_WIDTH_INDEX] = profile->step_width_deg;
+  flash_data[LOCAL_PROFILE_CHECKSUM_INDEX] = local_profile_checksum(profile);
+  flash_data[LOCAL_PROFILE_MARKER_INDEX] = LOCAL_PROFILE_MARKER;
+}
+
+static void local_profile_apply(const MysysLocalProfile *profile)
+{
+  (void)smart_knob_mode_apply_local_profile(
+      profile->mode,
+      profile->force_percent,
+      (uint16_t)profile->current_limit_10ma * 10U,
+      profile->step_width_deg);
+  (void)smart_knob_select_mode(profile->mode);
+  local_profile_packed = local_profile_pack(profile);
+}
+
+static void MysysLocalLoadProfile(void)
+{
+  MysysLocalProfile profile = {
+      .mode = (uint8_t)SMART_KNOB_DEFAULT_MODE,
+      .force_percent = LOCAL_PROFILE_DEFAULT_FORCE,
+      .current_limit_10ma = LOCAL_PROFILE_DEFAULT_LIMIT_10MA,
+      .step_width_deg = smart_knob_mode_default_width_deg(
+          (uint8_t)SMART_KNOB_DEFAULT_MODE),
+  };
+
+  MysysLocalProfile stored = {
+      .mode = flash_data[LOCAL_PROFILE_MODE_INDEX],
+      .force_percent = flash_data[LOCAL_PROFILE_FORCE_INDEX],
+      .current_limit_10ma = flash_data[LOCAL_PROFILE_LIMIT_INDEX],
+      .step_width_deg = flash_data[LOCAL_PROFILE_WIDTH_INDEX],
+  };
+  if (flash_data[LOCAL_PROFILE_MAGIC_INDEX] == LOCAL_PROFILE_MAGIC &&
+      flash_data[LOCAL_PROFILE_VERSION_INDEX] == LOCAL_PROFILE_VERSION &&
+      flash_data[LOCAL_PROFILE_MARKER_INDEX] == LOCAL_PROFILE_MARKER &&
+      flash_data[LOCAL_PROFILE_CHECKSUM_INDEX] ==
+          local_profile_checksum(&stored) &&
+      local_profile_valid(&stored)) {
+    profile = stored;
+  }
+
+  /* Local-direct mode owns the actuator and leaves the CAN transceiver in
+     standby. The old communication fields remain in the Flash layout so an
+     existing calibrated device can migrate without erasing its offset. */
+  comm_type = COMM_TYPE_NONE;
+  motor_mode = MODE_DIAL;
+  last_motor_mode = MODE_DIAL;
+  mode_switch_flag = 0U;
+  over_vol_protect_mode = 1U;
+  brightness_index = 100U;
+  rgb_show_mode = 0U;
+  HAL_GPIO_WritePin(CAN_STB_GPIO_Port, CAN_STB_Pin, GPIO_PIN_SET);
+
+  local_profile_apply(&profile);
+  local_profile_stage_for_flash(&profile);
+  flash_data[1] = MODE_DIAL;
+  flash_data[29] = COMM_TYPE_NONE;
+}
+
+static void MysysLocalStart(void)
+{
+  motor_output = 1U;
+  MotorDriverSetCurrentRealContinuous(0.0f);
+  init_smart_knob();
+  rgb_color = 0x100010U;
+  if (error_code == ERR_NONE && !over_vol_flag && !err_stalled_flag &&
+      !over_value_flag) {
+    MotorDriverSetMode(MDRV_MODE_RUN);
+  }
+}
+
+uint32_t MysysLocalProfilePacked(void)
+{
+  return local_profile_packed;
+}
+
+uint8_t MysysLocalSavePending(void)
+{
+  return local_save_pending;
+}
+
+void MysysLocalMenuEnter(void)
+{
+  if (error_code != ERR_NONE || local_save_pending) {
+    return;
+  }
+  local_menu_restore_output = motor_output;
+  motor_mode = MODE_DIAL;
+  motor_output = 1U;
+  MotorDriverSetCurrentRealContinuous(0.0f);
+  smart_knob_enter_navigation_mode();
+  MotorDriverSetMode(MDRV_MODE_RUN);
+}
+
+void MysysLocalMenuExit(uint32_t packed_profile)
+{
+  MysysLocalProfile profile = local_profile_unpack(packed_profile);
+  if (!local_profile_valid(&profile)) {
+    profile = local_profile_unpack(local_profile_packed);
+  }
+
+  MotorDriverSetCurrentRealContinuous(0.0f);
+  MotorDriverSetMode(MDRV_MODE_OFF);
+  local_profile_apply(&profile);
+  local_profile_stage_for_flash(&profile);
+  motor_mode = MODE_DIAL;
+  motor_output = local_menu_restore_output;
+  flash_data[1] = MODE_DIAL;
+  flash_data[29] = COMM_TYPE_NONE;
+
+  local_resume_after_storage = local_menu_restore_output;
+  local_save_pending = 1U;
+  flash_data_write_back_flag = 1U;
+  LocalRgbNotifySave();
+}
+
+void MysysLocalToggleOutput(void)
+{
+  if (local_save_pending) {
+    return;
+  }
+  if (motor_output) {
+    motor_output = 0U;
+    MotorDriverSetCurrentRealContinuous(0.0f);
+    MotorDriverSetMode(MDRV_MODE_OFF);
+  }
+  else if (error_code == ERR_NONE && !over_vol_flag && !err_stalled_flag &&
+           !over_value_flag) {
+    motor_mode = MODE_DIAL;
+    motor_output = 1U;
+    init_smart_knob();
+    MotorDriverSetMode(MDRV_MODE_RUN);
+  }
+}
 
 static void schedule_over_voltage_recovery(uint32_t now_ms)
 {
@@ -651,39 +851,18 @@ void InitMysys(void)
   HAL_NVIC_ClearPendingIRQ(TIM1_UP_TIM16_IRQn);
   __HAL_TIM_ENABLE_IT(&htim1, TIM_IT_UPDATE);
   HAL_Delay(300); 
-  /* Seed erased/invalid storage with the CAN default. An old page is migrated
-     in RAM; its marker is persisted by the next explicit configuration save,
-     so boot does not trigger an unsolicited Flash erase. */
-  comm_type = COMM_TYPE_CAN;
-  flash_data[FLASH_DEFAULTS_VERSION_INDEX] = FLASH_DEFAULTS_CAN_V1;
+  /* Preserve the existing calibration/PID page, then migrate its unused tail
+     to the local UI profile without performing an unsolicited boot-time erase. */
+  comm_type = COMM_TYPE_NONE;
   init_flash_data();
-  if (flash_data[FLASH_DEFAULTS_VERSION_INDEX] != FLASH_DEFAULTS_CAN_V1) {
-    comm_type = COMM_TYPE_CAN;
-    flash_data[FLASH_DEFAULTS_VERSION_INDEX] = FLASH_DEFAULTS_CAN_V1;
-  }
-  u8g2Init(&u8g2);  
-  if (!HAL_GPIO_ReadPin(SYS_SW_GPIO_Port, SYS_SW_Pin)) {
-    /*
-     * Button-held boot is the explicit local setup path. A replacement
-     * absolute encoder has a different electrical zero, so align it before
-     * the SmartKnob menu enables FOC.  Do not write Flash during the early
-     * startup path: an interrupted power-up must never affect the next boot.
-     */
-    if (!MysysCalibrateEncoder(3000U)) {
-      u8g2_ClearBuffer(&u8g2);
-      u8g2_SetFont(&u8g2, u8g2_font_6x10_tr);
-      u8g2_DrawStr(&u8g2, 16, 12, "<CAL>");
-      u8g2_SetFont(&u8g2, u8g2_font_5x8_tr);
-      u8g2_DrawStr(&u8g2, 12, 27, "TIMEOUT");
-      u8g2_DrawStr(&u8g2, 2, 41, "POWER CYCLE");
-      u8g2_SendBuffer(&u8g2);
-      while (1) {
-        /* The encoder reference is not trusted; keep the driver off. */
-      }
-    }
-    u8g2_disp_menu_init();
-    u8g2_disp_menu_update();
-  }  
+  /* init_flash_data() applies the persisted electrical offset after the fast
+     encoder loop has already sampled the power-on coordinate. Let one fresh
+     sample land, then discard the pre-offset turn/speed history before the
+     haptic center is anchored. */
+  HAL_Delay(5U);
+  rebase_encoder_after_calibration();
+  MysysLocalLoadProfile();
+  u8g2Init(&u8g2);
   init_pid();
   if (comm_type == COMM_TYPE_I2C) {
     user_i2c_init();
@@ -700,6 +879,8 @@ void InitMysys(void)
   }
 
   u8g2_disp_init();
+  LocalUiInitialize();
+  MysysLocalStart();
 }
 
 
@@ -712,99 +893,26 @@ void LoopMysys(void)
 
 void LoopMysysOnce(void)
 {
-        i2c_timeout_counter = 0;
-        if (i2c_stop_timeout_flag) {
-          if (i2c_stop_timeout_delay < HAL_GetTick()) {
+        /* Communication recovery is retained for legacy builds, but is never
+           entered by the local-direct profile. */
+        if (comm_type != COMM_TYPE_NONE) {
+          i2c_timeout_counter = 0;
+          if (i2c_stop_timeout_flag && i2c_stop_timeout_delay < HAL_GetTick()) {
             i2c_stop_timeout_counter++;
             i2c_stop_timeout_delay = HAL_GetTick() + 10;
           }
-        }
-        if (i2c_stop_timeout_counter > 50) {
-          LL_I2C_DeInit(I2C1);
-          LL_I2C_DisableAutoEndMode(I2C1);
-          LL_I2C_Disable(I2C1);
-          LL_I2C_DisableIT_ADDR(I2C1);     
-          user_i2c_init();    
-          i2c1_it_enable();
-          HAL_Delay(500);
-        }       
-        button_update();
-        u8g2_disp_update_mode();
-        u8g2_disp_update_page();
-        u8g2_disp_update_comm();
-        
-        if (my_button.was_click) {
-          dis_show_flag++;
-          if (dis_show_flag >= DIS_MAX)
-            dis_show_flag = DIS_INFO;
-          last_dis_show_flag = dis_show_flag;
-          my_button.was_click = 0;
-        }
-        if (my_button.is_longlongpressed) {
-          if (mode_switch_flag) {
-            App_PostControlCommand(APP_CONTROL_COMMAND_CYCLE_MODE, 0);
-            my_button.is_longlongpressed = 0;
+          if (i2c_stop_timeout_counter > 50) {
+            LL_I2C_DeInit(I2C1);
+            LL_I2C_DisableAutoEndMode(I2C1);
+            LL_I2C_Disable(I2C1);
+            LL_I2C_DisableIT_ADDR(I2C1);
+            user_i2c_init();
+            i2c1_it_enable();
           }
-        }
-        //get input voltage
-        if(ph_crrent_lpf<0)
-        {
-          disp_ph_current = (uint16_t)(-ph_crrent_lpf);
-        }
-        else
-        {
-          disp_ph_current = (uint16_t)(ph_crrent_lpf);
         }
 
-        if (over_vol_flag) {
-          dis_show_flag = DIS_OVP;
-        }
-        else if (err_stalled_flag) {
-          dis_show_flag = DIS_STALL;
-        }        
-        else if (over_value_flag) {
-          dis_show_flag = DIS_OVER_VALUE;
-        }        
-        else {
-          dis_show_flag = last_dis_show_flag;
-        }
-        if (rgb_color_buffer_index && rgb_show_mode) {
-          uint32_t rgb_show_index = rgb_color_buffer_index;
-          for (uint32_t i = 0; i < rgb_show_index; i++) {
-            neopixel_set_color(0, rgb_color_buffer[i]);
-            neopixel_set_color(1, rgb_color_buffer[i]);
-            ws2812_show();
-          }
-          rgb_color_buffer_index = 0;
-        }         
-        switch (dis_show_flag)
-        {
-        case DIS_CHAR:
-          u8g2_disp_char();
-          break;
-        case DIS_GRAPHY:
-          u8g2_disp_all();
-          break;
-        case DIS_INFO:
-          u8g2_disp_info();
-          break;
-        case DIS_PID:
-          u8g2_disp_pid();
-          break;
-        case DIS_OVP:
-          u8g2_disp_ovp();
-          break;
-        case DIS_STALL:
-          u8g2_disp_stall();
-          break;          
-        case DIS_OVER_VALUE:
-          u8g2_disp_over_value();
-          break;            
-        
-        default:
-          break;
-        }
-        ws2812_flash();
+        LocalUiTask();
+        LocalRgbTask();
         
         if (act_delay < HAL_GetTick()) {
           running_index++;
@@ -825,8 +933,18 @@ void MysysStorageOnce(void)
   /* Flash operations may stall instruction fetch.  Defer them until the
      current-control output is no longer running. */
   if (flash_data_write_back_flag && sys_status != SYS_RUNNING) {
-    flash_data_write_back();
+    (void)flash_data_write_back();
     flash_data_write_back_flag = 0;
+
+    if (local_save_pending) {
+      local_save_pending = 0U;
+      if (local_resume_after_storage && error_code == ERR_NONE &&
+          !over_vol_flag && !err_stalled_flag && !over_value_flag) {
+        init_smart_knob();
+        MotorDriverSetMode(MDRV_MODE_RUN);
+      }
+      local_resume_after_storage = 0U;
+    }
   }
 
 }

@@ -19,21 +19,21 @@
 | `init_flash_data()` | 启动时读取 Flash 或写入默认配置 |
 | `flash_data_write_back()` | 保存当前配置到 Flash |
 | `Slave_Complete_Callback()` | I2C 完整事务回调，解析寄存器读写 |
-| `main()` | 初始化外设，调用 `InitMysys()` 和 `LoopMysys()` |
+| `main()` | 初始化本地运行所需外设、保持 CAN standby，调用 `InitMysys()` 和 `App_StartScheduler()` |
 
 ## `MyFile/src/mysys.c`
 
 职责：
 
 - 系统状态中心。
-- PID 参数、目标值、保护状态、通信状态的全局定义。
+- PID 参数、目标值、保护状态、本地 profile 和持久化状态的全局定义。
 - 业务初始化、ControlTask 控制步和 TIM1 FOC 快环。
 
 关键函数：
 
 | 函数 | 运行方式 |
 | --- | --- |
-| `InitMysys()` | 上电初始化 ADC、PWM、电机、编码器、Flash、OLED、通信 |
+| `InitMysys()` | 上电初始化 ADC、PWM、电机、编码器、Flash、本地 SmartKnob profile 和 OLED |
 | `LoopMysysOnce()` | MaintenanceTask 调用的慢速单步函数 |
 | `MysysStorageOnce()` | StorageTask 调用的安全写回单步函数 |
 | `Loop_FOC()` | 约 18.67 kHz DMA2 RX 完成 ISR 调用，运行 FOC 和 ADC 处理 |
@@ -129,9 +129,20 @@
 
 运行：
 
-- `init_smart_knob()` 在进入 Dial 模式或菜单前调用。
-- `handle_smart_knob()` 在 TIM1 模式分支中调用。
-- `current_position` 既是 Dial 输出，也被菜单当作导航输入。
+- `init_smart_knob()` 在上电加载本地预设时调用。
+- `handle_smart_knob()` 由 1 kHz ControlTask 的 Dial 分支调用。
+- `smart_knob_enter_navigation_mode()` 进入私有 `0xFF` 菜单导航挡位。
+- `current_position` 是正常挡位位置；导航期间 LocalUi 读取其增量作为光标输入。
+
+## `MyFile/src/local_ui.c`
+
+职责：
+
+- 绘制 64×48 圆形速度表、挡位位置、模式和故障覆盖层。
+- 管理 `MODE/FORCE/STEP/LIMIT/SAVE` 菜单状态机。
+- 把长按、双击和旋钮挡位变化转换成本机控制命令。
+
+运行：MaintenanceTask 每 10 ms 调用 `LocalUiTask()`；内部将 OLED 刷新限制为 20 Hz。UI 只投递命令，不直接修改电机控制状态。
 
 ## `Core/Src/i2c.c`
 
@@ -172,6 +183,8 @@
 
 运行：
 
+当前本地入口不调用 `MX_FDCAN1_Init()`，`comm_type` 固定为 `COMM_TYPE_NONE`，CommunicationTask 不创建。以下是恢复旧总线功能时才会进入的路径：
+
 - `user_fdcan_init()` 按 `can_id` 和 `bps_index` 设置 filter 和波特率。
 - `HAL_FDCAN_RxFifo0Callback()` 只通知 CommunicationTask 并记录 FIFO loss。
 - CommunicationTask 调用 `FDCAN_ReadPendingCommand()`，将本机命令排队给 ControlTask；命令 `19–22` 的桥接操作留在 CommunicationTask。
@@ -202,43 +215,54 @@
 
 - `u8g2Init()` 在 `InitMysys()` 中调用。
 
-## `MyFile/src/u8g2_disp_fun.c`
+## `MyFile/src/u8g2_disp_fun.c`（旧界面）
 
 职责：
 
-- OLED 页面绘制。
-- 菜单系统。
-- 通信/运行状态显示。
+- 旧 OLED 协议页面和阻塞式配置菜单。
+- 通信/运行状态显示 helper。
 - RGB 灯效策略。
 
 运行：
 
-- `u8g2_disp_init()` 显示启动 logo。
-- `LoopMysys()` 周期调用 `u8g2_disp_update_mode/page/comm()` 和具体页面绘制函数。
-- 菜单模式会临时进入 Dial 运行模式，用旋钮选择选项。
+- `u8g2_disp_init()` 仍用于启动显示初始化。
+- 正常运行不再调用旧四页状态界面或旧阻塞菜单；本地 UI 由 `local_ui.c` 接管。
+- 旧 `ws2812_flash()` 仅作为协议界面遗留代码保留，本地状态灯不再调用。
 
 ## `MyFile/src/button.c`
 
 职责：
 
-- PC6 按键滤波。
-- 生成短按、长按、长长按事件。
+- PC6 按键非阻塞去抖。
+- 生成延迟单击、双击、1.2 s 即时长按和旧 5 s 兼容事件。
 
 运行：
 
-- `LoopMysys()` 和菜单循环都会调用 `button_update()`。
+- MaintenanceTask 通过 `LoopMysysOnce()` 每 10 ms 调用 `button_update()`。
 
 ## `MyFile/src/ws2812.c`
 
 职责：
 
-- SK6812/WS2812 两颗灯珠的数据缓存和 PWM-DMA 发送。
+- SK6812/WS2812 两颗灯珠的静态颜色缓存和 PWM-DMA 发送。
+- DMA busy/dirty 状态、丢回调超时恢复和诊断计数。
 
 运行：
 
-- `sk6812_init()` 分配颜色缓存。
+- `sk6812_init()` 清理静态颜色与帧缓存，不再使用堆分配。
 - `neopixel_set_color()` 设置单颗灯颜色并应用亮度百分比。
-- `ws2812_show()` 把 GRB 数据展开为 TIM3 PWM DMA 帧。
+- `ws2812_show()` 标记更新；`ws2812_service()` 仅在颜色变化且 DMA 空闲时发送 GRB 帧。
+- `ws2812_on_pwm_complete()` 在 TIM3 CH2 完成回调中停止输出并释放 busy 状态。
+
+## `MyFile/src/local_rgb.c`
+
+职责：
+
+- 将运行、暂停、菜单、编辑、保存和故障映射为唯一且确定的灯效。
+- 生成低亮紫色呼吸与红色双闪时序。
+- 保存提示至少保持 700 ms，避免 Flash 写入过快导致肉眼看不到。
+
+运行：MaintenanceTask 每 10 ms 调用 `LocalRgbTask()`；效果计算上限为 50 Hz，颜色未变化时不会重发 DMA。
 
 ## `Core/Src/tim.c`
 

@@ -2,19 +2,21 @@
 
 ## 目标与边界
 
-SmartKnob 触感环完全运行在 STM32 固件中：ControlTask 以 1 kHz 读取本机机械角度和速度、更新 detent 状态机并直接给出 q 轴电流目标。上位机只负责切换预设、在线修改参数和显示固件主动上报的状态，不参与逐周期电流闭环。
+SmartKnob 触感环和用户交互全部运行在 STM32 固件中：ControlTask 以 1 kHz 读取本机机械角度和速度、更新 detent 状态机并直接给出 q 轴电流目标；MaintenanceTask 识别按键并绘制 OLED。本地菜单直接切换预设和参数，不需要上位机。
 
-这样 CAN 延迟、Windows 调度抖动或上位机暂时卡顿不会进入触感闭环。原有约 18.67 kHz FOC 电流环由 TIM1 更新中断启动编码器 DMA，并在 DMA2 RX 完成 ISR 内接续本周期 FOC；SmartKnob 不修改电流环和 PWM 实现。
+原有约 18.67 kHz FOC 电流环由 TIM1 更新中断启动编码器 DMA，并在 DMA2 RX 完成 ISR 内接续本周期 FOC；SmartKnob 不修改电流环和 PWM 实现。CAN/I2C 协议实现仍保留，但本地启动路径不初始化 FDCAN，也不创建 CommunicationTask。
 
 ## 模块
 
 | 文件 | 职责 |
 | --- | --- |
-| `MyFile/inc/smart_knob.h` | 配置、调参、运行状态和 CAN 参数接口 |
+| `MyFile/inc/smart_knob.h` | 配置、调参、运行状态和私有导航模式接口 |
 | `MyFile/inc/smart_knob_modes.h` | 模式枚举和默认模式选择 |
 | `MyFile/src/smart_knob_modes.c` | 每个模式独立的预设参数表 |
 | `MyFile/src/smart_knob.c` | 1 kHz detent/endstop/current 算法、在线配置和遥测快照 |
-| `Core/Src/fdcan.c` | CAN function 转发和主动遥测帧发送 |
+| `MyFile/src/local_ui.c` | 仪表盘、菜单、按键事件和旋钮光标交互 |
+| `MyFile/src/mysys.c` | 本地 profile 加载、应用、保存和启停边界 |
+| `Core/Src/fdcan.c` | 保留的 CAN function 与主动遥测实现，当前入口不启用 |
 
 默认 SmartKnob 预设只需要修改：
 
@@ -23,7 +25,7 @@ SmartKnob 触感环完全运行在 STM32 固件中：ControlTask 以 1 kHz 读�
 #define SMART_KNOB_DEFAULT_MODE SMART_KNOB_MODE_COARSE_STRONG
 ```
 
-固件的默认电机运行模式是 `MODE_DIAL`。Flash 中已有的合法运行模式仍会在启动时覆盖首次出厂默认值；SmartKnob 的预设和在线调参当前是运行期配置，复位后回到上述编译期默认预设。
+固件固定以 `MODE_DIAL` 本地运行。Flash 中不存在合法本地 profile 时使用 `COARSE_STRONG / 100% / 450 mA / 8°`；从菜单保存后，模式、力度、挡位角和电流上限在下次上电自动恢复。
 
 ## 内置模式
 
@@ -46,6 +48,16 @@ SmartKnob 触感环完全运行在 STM32 固件中：ControlTask 以 1 kHz 读�
 
 每个模式都是独立的 `SmartKnobModeConfig`，包含上游 SmartKnob 的位置、范围、宽度、detent/endstop、snap 和磁吸位置字段，以及本电机的 P/D、电流缩放、电流限幅、摩擦补偿和 click 电流字段。修改一个模式不会改变其他模式。
 
+## 本地 profile 与菜单导航
+
+`smart_knob_mode_apply_local_profile()` 每次先从只读预设重建活动配置，再应用本地调整，避免反复进入菜单后比例累计：
+
+- `FORCE`：25～125%，以 5% 为步进缩放预设的 `current_scale_a`。
+- `STEP`：1～60°，以 1° 为步进覆盖挡位宽度。
+- `LIMIT`：100～450 mA，以 50 mA 为步进限制 SmartKnob 电流。
+
+菜单使用私有模式 `SMART_KNOB_NAVIGATION_MODE = 0xFF`。它提供 12°、双向无边界的轻挡位，只用于光标和数值交互，不计入 12 个用户预设，也不会覆盖用户模式的位置状态。退出菜单后才一次性应用用户 profile。
+
 ## 电流计算和保护
 
 固件使用以下电流型触感表达式：
@@ -66,7 +78,9 @@ current = current_scale * pid + friction_current + click_current
 - idle detent-center correction 只用于无边界旋钮；有 min/max 的挡位保持固定中心网格，慢速停留不会让虚拟挡位中心追随手的位置。
 - 编码器单步不连续或进入 Dial 后 300 ms 稳定期内，电流目标归零。无效样本仍会推进原始位置基线，连续两个合理样本后重新同步滤波位置，因此单次跳变或真实高速转动不会永久锁死触感输出。
 
-## CAN 参数
+## 保留的 CAN 参数接口（当前不启用）
+
+以下接口用于说明源码中保留的兼容能力。当前本地入口不初始化 FDCAN、不创建 CommunicationTask，正常运行不会发送遥测或接受这些命令。
 
 仍使用原协议的 function read/write：`cmd=0x11` 读取，`cmd=0x12` 写入；function index 位于 `data[0..1]`，写值或读回值位于 `data[4..7]`，均为 little-endian `int32`。
 
@@ -150,7 +164,7 @@ bits 7..0    destination host ID
 
 bit1 来自 FOC 电流环的实际使能状态，而不是上位机最后写入的开关请求；因此过压保护关闭驱动后，bit1 会清零。bit7 可直接区分过压与其他 fault，输入电压仍可通过原协议 `0x7034` 读取。
 
-## 推荐上位机启动顺序
+## 恢复 CAN 后的参考上位机启动顺序
 
 ```text
 write 0x8001 = preset index       先选活动模式

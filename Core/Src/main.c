@@ -38,6 +38,7 @@
 #include "myadc.h"
 #include "smart_knob.h"
 #include "app_rtos.h"
+#include "local_rgb.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -264,7 +265,7 @@ bool flash_data_write_back(void)
 
 void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
 {
-  HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_2);
+  ws2812_on_pwm_complete(htim);
 }
 
 void Slave_Complete_Callback(uint8_t *rx_data, uint16_t len)
@@ -897,16 +898,18 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  /* Local-direct firmware keeps the external CAN transceiver silent. */
+  HAL_GPIO_WritePin(CAN_STB_GPIO_Port, CAN_STB_Pin, GPIO_PIN_SET);
   MX_DMA_Init();
   MX_ADC1_Init();
   MX_TIM1_Init();
   MX_SPI1_Init();
   MX_TIM3_Init();
   MX_I2C1_Init();
-  MX_FDCAN1_Init();
   /* USER CODE BEGIN 2 */
 	InitMysys();
-  sk6812_init(PIXEL_MAX); 	
+  sk6812_init(PIXEL_MAX);
+  LocalRgbInitialize();
   App_StartScheduler();
   /* USER CODE END 2 */
 

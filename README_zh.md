@@ -2,22 +2,19 @@
 
 [English](README.md) | 简体中文
 
-本程序是专门为 **hex-usb-canfd-hub** 产品的**smart knob功能**定制的固件。结合 **hex-usb-canfd-hub** 与其配套图形化上位机可以无缝连接并使用其内置的smart knob功能。
+这是 M5 Stack RollerCAN 的本地直运行 SmartKnob 固件，基于 M5 的[官方开源固件](https://github.com/m5stack/M5Unit-RollerCAN-Internal-FW)修改。FOC、触感状态机、模式切换、参数设置和 OLED 都在 STM32G431 上完成，不需要 CANFD 上位机参与运行。
 
-本程序为 **M5 Stack-Rollercan** 的专用固件，由M5官方开源的固件 [官方固件](https://github.com/m5stack/M5Unit-RollerCAN-Internal-FW) 修改而成。
-
-
-
-ROLLERCAN 是一个基于 STM32G431 的无刷电机控制固件。工程由 STM32CubeMX 生成的 HAL/LL 外设初始化代码、`MyFile` 目录下的业务控制模块、裁剪后的 `U8g2_lib` 显示库，以及 CMake/MDK 两套工程入口组成。
+旧 I2C/CANFD 协议代码仍保留作参考，但当前入口不会初始化 FDCAN，CAN 收发任务也不会创建，外部收发器保持 standby。
 
 固件的核心职责是：
 
 - 通过 TIM1 三相 PWM 和 ADC 采样运行 FOC 电流环。
 - 通过 TLE5012B SPI 编码器得到转子角度和机械位置。
-- 提供速度、位置、电流和 Dial/SmartKnob 四类运行模式。
-- 通过 I2C 从机寄存器协议和 CAN FD 扩展 ID 帧协议收发控制命令。
-- 在 64x48 SSD1306 OLED 和 2 颗 SK6812/WS2812 灯珠上显示状态、菜单和告警。
-- 将编码器校准 offset、I2C 地址、CAN ID、通信模式、PID 参数和保护开关等配置保存到片内 Flash。
+- 在本地运行 12 种 Dial/SmartKnob 触感预设。
+- 通过旋钮挡位、长按和双击操作本地菜单。
+- 在 64×48 SSD1306 OLED 上显示圆形速度表、挡位、模式和告警。
+- 用稳定的 RGB 呼吸/常亮/双闪区分运行、暂停、菜单、保存和故障。
+- 将模式、力度、挡位角、电流上限和编码器 offset 保存到片内 Flash。
 
 ## 快速入口
 
@@ -29,9 +26,9 @@ ROLLERCAN 是一个基于 STM32G431 的无刷电机控制固件。工程由 STM3
 | [构建与烧录](docs/build-and-flash.md) | CMake/MDK 工程、工具链、构建命令、产物 |
 | [外设与引脚](docs/peripherals.md) | TIM/ADC/SPI/I2C/FDCAN/GPIO/DMA 的用途 |
 | [控制链路](docs/control-loop.md) | FOC、电流环、速度环、位置环、电流模式、Dial 模式 |
-| [固件 SmartKnob](docs/smartknob-firmware.md) | 模块化模式、默认预设、CAN 在线配置和主动遥测 |
+| [固件 SmartKnob](docs/smartknob-firmware.md) | 本地预设、运行配置、导航挡位、电流限制和旧 CAN 接口参考 |
 | [通信协议](docs/communication-protocol.md) | I2C 寄存器表、CAN 命令、CAN-I2C 桥接 |
-| [显示与输入](docs/display-and-input.md) | OLED 页面、菜单、按键、灯效和本地编码器校准流程 |
+| [显示与输入](docs/display-and-input.md) | 圆形仪表盘、本地菜单、长按/双击、参数范围和安全边界 |
 | [持久化配置](docs/persistence.md) | Flash 数据布局、编码器 offset 保存、读写时机、保护状态保存 |
 | [模块参考](docs/module-reference.md) | 每个源文件/模块的职责和运行方式 |
 | [维护注意事项](docs/maintenance-notes.md) | CubeMX 再生成、U8g2 裁剪、调试建议 |
@@ -59,21 +56,19 @@ STM32G431XX_FLASH.ld  CubeMX 生成的默认链接脚本，CMake 不使用
 
 ## 一句话运行图
 
-`main()` 完成外设初始化和 `InitMysys()` 后启动 FreeRTOS。1 kHz ControlTask 独占外环、保护状态机、SmartKnob 和本机控制状态；CommunicationTask 独占 FDCAN FIFO/发送并隔离 CAN-I2C 桥接；MaintenanceTask 负责 UI/按键/慢速维护，StorageTask 在电机停止后执行 Flash 写回。TIM1 中断以约 18.67 kHz 启动编码器 DMA，DMA2 RX 完成中断提交同周期角度并接续 FOC。ControlTask 与 FOC 通过带序号的驱动命令和传感器快照交换数据。
+`main()` 完成外设初始化和 `InitMysys()` 后启动 FreeRTOS。1 kHz ControlTask 独占保护状态机、SmartKnob 和本机控制状态；MaintenanceTask 负责按键、OLED 和灯效；StorageTask 在电机卸力后保存本地配置。当前不创建 CommunicationTask。TIM1 中断以约 18.67 kHz 启动编码器 DMA，DMA2 RX 完成中断提交同周期角度并接续 FOC。
 
 ```text
 上电
   -> HAL_Init/SystemClock_Config
-  -> MX_GPIO/MX_DMA/MX_ADC/MX_TIM/MX_SPI/MX_I2C/MX_FDCAN
+  -> MX_GPIO/MX_DMA/MX_ADC/MX_TIM/MX_SPI/MX_I2C
   -> InitMysys
-       -> ADC DMA / TIM1 PWM / 电机驱动 / 编码器 / Flash 配置 / OLED / 通信
-       -> 是否按住 SYS_SW 上电？
-            -> 临时编码器校准（仅 RAM）
-            -> 本地设置菜单；CAL 可重新校准并保存
+       -> ADC DMA / TIM1 PWM / 电机驱动 / 编码器 / Flash 本地配置 / OLED
+       -> 加载编码器 offset 后重置多圈跟踪并锚定当前触感中心
+       -> 启动本地 Dial 输出，CAN 收发器保持 standby
   -> App_StartScheduler
        -> ControlTask: 1 kHz 外环、保护、SmartKnob 和本机命令执行
-       -> CommunicationTask: FDCAN RX/TX、帧解码和 CAN-I2C 桥接
-       -> MaintenanceTask: 按键、显示、灯效、通信恢复
+       -> MaintenanceTask: 长按/双击、仪表盘、本地菜单和灯效
        -> StorageTask: 安全状态下的 Flash 写回
 
 TIM1_UP_TIM16_IRQHandler
@@ -84,31 +79,19 @@ DMA2_Channel1_IRQHandler
   -> Loop_FOC
 ```
 
-## 本地设置与编码器校准
+## 本地操作
 
-本地设置菜单在 FreeRTOS 启动前运行，操作步骤如下：
+- 正常界面双击：启用/暂停力反馈。
+- 正常界面长按约 1.2 秒：进入菜单。
+- 菜单旋转：用独立的 12° 挡位移动光标或调整数值。
+- 菜单双击：进入或确认；参数页长按取消；根菜单长按保存退出。
+- 菜单可设置 `MODE`、`FORCE`、`STEP` 和 `LIMIT`。
 
-1. 关闭设备电源，确认输出轴空载且能够自由转动。
-2. 按住 `SYS_SW` 的同时给设备上电。
-3. 进入菜单前，固件会先执行一次临时编码器校准，以确保更换编码器后仍能使用 SmartKnob 导航菜单。该次校准只更新 RAM，不写入 Flash。
-4. 旋转菜单越过 `RANGE` 找到 `CAL`，单击进入。
-5. 确认页默认选中 `Cancel`；旋转到 `Start`，再次单击才会正式开始校准。
-6. 校准期间屏幕依次显示 `MOTOR MOVES`、`DO NOT TOUCH` 和 `WAIT...`。
-7. 校准结束后，单击结果页返回 `CAL`，再正常退出设置菜单。
-
-编码器对齐期间，电机会以约 1.2 A 驱动约 1.5 秒。操作时不要触碰输出轴，并确保连接机构不会阻碍转动。进入菜单前的临时校准和菜单内的显式 `CAL` 操作都带有 3 秒超时；超时会清零电流目标并关闭驱动。
-
-显式 `CAL` 只会在校准成功后应用新 offset 并尝试写入 Flash。结果页含义如下：
-
-| 结果 | 含义 |
-| --- | --- |
-| `SAVED` | 新 offset 已写入并校验，下次上电会自动加载 |
-| `SAVE FAIL` | 新 offset 本次运行仍然生效，但 Flash 保存未确认；依赖该结果前应重新校准 |
-| `TIMEOUT` / `NOT SAVED` | 校准未完成，继续使用原 offset，且不会写 Flash |
-
-如果进入菜单前的临时校准超时，固件会保持驱动关闭并显示 `POWER CYCLE`，不会继续进入菜单。正常上电且未按住 `SYS_SW` 时不会运行这条本地校准路径，而是直接加载 Flash 中已保存的 offset。
+保存时固件先清零电流、关闭驱动，完成 Flash 擦写和校验后再恢复进入菜单前的运行/暂停状态。完整范围和模式缩写见[显示与输入](docs/display-and-input.md)。
 
 ## CAN FD 总线配置
+
+以下内容是保留的旧协议参考。当前本地直运行入口不调用 `MX_FDCAN1_Init()`，也不创建 CommunicationTask；如需恢复总线控制，需要同时恢复外设初始化和通信任务。
 
 默认 `bps_index=0` 时，固件 CAN 总线配置与以下命令精确一致：
 

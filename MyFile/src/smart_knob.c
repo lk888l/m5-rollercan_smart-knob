@@ -81,6 +81,30 @@ static uint8_t telemetry_sequence;
 static uint8_t telemetry_pending_type;
 static SmartKnobRuntimeState telemetry_latched_state;
 
+/* A private, unbounded gear used only while the local OLED menu owns the
+   shaft. It deliberately lives outside SmartKnobMode so it cannot appear as
+   a user preset or overwrite the selected preset's runtime position. */
+static SmartKnobModeConfig navigation_mode = {
+    .config = {
+        .position = 0,
+        .min_position = -2048,
+        .max_position = 2047,
+        .position_width_radians = DEG_TO_RAD(12.0f),
+        .detent_strength_unit = 1.0f,
+        .endstop_strength_unit = 1.0f,
+        .snap_point = 0.72f,
+        .text = "Menu navigation",
+    },
+    .tuning = {
+        .p_gain = 24.0f,
+        .d_gain = 0.16f,
+        .current_scale_a = 0.16f,
+        .current_limit_a = 0.30f,
+        .max_current_permille = 500U,
+        .click_current_a = 0.06f,
+    },
+};
+
 static float clampf(float value, float lower, float upper)
 {
     if (value < lower) {
@@ -159,6 +183,9 @@ static void sanitize_mode(SmartKnobModeConfig *mode)
 
 static SmartKnobModeConfig *active_mode_mutable(void)
 {
+    if (active_mode == SMART_KNOB_NAVIGATION_MODE) {
+        return &navigation_mode;
+    }
     return smart_knob_mode_get_mutable(active_mode);
 }
 
@@ -358,7 +385,8 @@ static void publish_runtime_state(float velocity_rad_s)
 void init_smart_knob(void)
 {
     smart_knob_modes_initialize();
-    if (active_mode >= smart_knob_modes_count()) {
+    if (active_mode != SMART_KNOB_NAVIGATION_MODE &&
+        active_mode >= smart_knob_modes_count()) {
         active_mode = (uint8_t)SMART_KNOB_DEFAULT_MODE;
     }
 
@@ -535,6 +563,17 @@ bool smart_knob_select_mode(uint8_t mode_index)
     return true;
 }
 
+void smart_knob_enter_navigation_mode(void)
+{
+    active_mode = SMART_KNOB_NAVIGATION_MODE;
+    if (!controller_initialized) {
+        init_smart_knob();
+    } else {
+        reanchor_active_mode(true);
+        publish_runtime_state(motor_rps);
+    }
+}
+
 uint8_t smart_knob_active_mode(void)
 {
     return active_mode;
@@ -542,7 +581,7 @@ uint8_t smart_knob_active_mode(void)
 
 const SmartKnobModeConfig *smart_knob_active_config(void)
 {
-    return smart_knob_mode_get(active_mode);
+    return active_mode_mutable();
 }
 
 static int32_t scaled_to_i32(float value)

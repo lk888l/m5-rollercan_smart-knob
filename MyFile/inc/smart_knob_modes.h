@@ -32,6 +32,11 @@ void smart_knob_modes_initialize(void);
 uint8_t smart_knob_modes_count(void);
 const SmartKnobModeConfig *smart_knob_mode_get(uint8_t mode_index);
 SmartKnobModeConfig *smart_knob_mode_get_mutable(uint8_t mode_index);
+bool smart_knob_mode_apply_local_profile(uint8_t mode_index,
+                                         uint8_t force_percent,
+                                         uint16_t current_limit_ma,
+                                         uint8_t step_width_deg);
+uint8_t smart_knob_mode_default_width_deg(uint8_t mode_index);
 
 #ifdef __cplusplus
 }

@@ -31,7 +31,7 @@ Flash 读写在 `Core/Src/flash.c`：
 
 ## Flash 数据布局
 
-`FLASH_DATA_SIZE = 48`，当前使用 0-36 和 47 字节。
+`FLASH_DATA_SIZE = 48`。0-36 保留原协议配置布局，37-43 和 47 保存本地 SmartKnob 配置。
 
 | Byte | 内容 | 说明 |
 | --- | --- | --- |
@@ -45,7 +45,7 @@ Flash 读写在 `Core/Src/flash.c`：
 | 17-20 | position Kp int | little-endian uint32 |
 | 21-24 | position Ki int | little-endian uint32 |
 | 25-28 | position Kd int | little-endian uint32 |
-| 29 | comm_type | I2C/CAN/CAN-I2C |
+| 29 | comm_type | 本地直运行固定为 `COMM_TYPE_NONE`；旧协议值仍可读取迁移 |
 | 30 | speed_pid_index | 速度 PID 参数组 |
 | 31 | pos_pid_index | 位置 PID 参数组 |
 | 32 | bps_index | CAN 波特率索引 |
@@ -53,10 +53,17 @@ Flash 读写在 `Core/Src/flash.c`：
 | 34 | rgb_show_mode | 系统默认/用户自定义 |
 | 35 | motor_stall_protection_flag | 堵转保护开关 |
 | 36 | motor_overvalue_protection_flag | 位置越界保护开关 |
-| 37-46 | 保留 | 当前未使用 |
-| 47 | defaults version | `0xC1` 表示已应用 CAN 默认值迁移 |
+| 37 | local magic | 固定 `0x4C` |
+| 38 | local profile version | 当前为 `1` |
+| 39 | SmartKnob mode | 0-11 用户预设索引 |
+| 40 | force percent | 25-125 |
+| 41 | current limit / 10 mA | 10-45，即 100-450 mA |
+| 42 | step width degrees | 1-60° |
+| 43 | local checksum | `0xA5` 与 byte 39-42 的 XOR |
+| 44-46 | 保留 | 当前写为 0/保持原值 |
+| 47 | local marker | 固定 `0xD1` |
 
-没有该版本标记的旧配置会在启动时先把 RAM 中的 `comm_type` 迁移为 CAN，但不会仅为迁移主动擦写 Flash；版本标记随下一次菜单或协议配置保存一并写回。写入标记后，后续显式保存的 I2C/CAN/CAN-I2C 选择不会再被默认值覆盖。
+旧页面没有合法的 magic/version/marker/checksum 时，固件只在 RAM 中使用 `COARSE+ / 100% / 450 mA / 8°` 默认值，不会仅为迁移主动擦写 Flash。用户第一次从本地菜单保存时写入新布局。原 byte 2-3 编码器 offset 会继续保留。
 
 ## 写回触发
 
@@ -66,17 +73,12 @@ Flash 读写在 `Core/Src/flash.c`：
 
 | 来源 | 条件 |
 | --- | --- |
-| I2C | 写 `0xF0 = 1` |
-| I2C | 写 `0xFF` 修改 I2C 地址 |
-| I2C | 写 `0xF2 = 1` 保存编码器 offset |
-| CAN | `cmd_id=10` 设置 `flash_data_write_back_flag` |
-| CAN | `FUNC_SAVE_FLASH` 写非 0 |
-| CAN | CommunicationTask 完成 CAN ID/波特率重配置后设置延后写回标志 |
-| OLED 菜单 | 确认 COM、I2C ADDR、CAN ID、PID 组、BPS、RGB、JAM、RANGE 等设置，或在 CAL 中完成校准 |
+| 本地菜单 | 根菜单长按或选择 `SAVE`，保存模式、力度、挡位角和电流上限 |
+| 旧 I2C/CAN 协议代码 | 相关入口仍在源码中，但本地直运行构建不初始化 FDCAN/I2C 从机，也不创建 CommunicationTask |
 
-StorageTask 会检测 `flash_data_write_back_flag`，并在电机不处于 `SYS_RUNNING` 时写入，因此 CAN/CommunicationTask 不直接擦写 Flash。
+本地菜单退出时会先将电流目标清零并关闭驱动，再设置 `flash_data_write_back_flag`。StorageTask 在 `SYS_RUNNING` 之外擦写并校验 Flash；完成后按照进入菜单前的运行/暂停状态决定是否重新启动力反馈。
 
-按键上电进入菜单前的临时编码器校准只更新 RAM 中的 `angle_cal_offset`，不会触发写回。只有用户在 `CAL` 项中二次确认并且校准成功后，固件才会在驱动关闭状态下保存 byte 2-3；写入函数返回底层擦写和逐字节校验结果，供菜单显示 `SAVED` 或 `SAVE FAIL`。
+编码器校准 helper 和旧 `CAL` 页面仍保留在源码中，但当前本地菜单没有暴露校准项，避免普通运行时误触发电机主动转动。需要重新校准时应通过调试流程显式执行，并确认输出轴空载。
 
 ## 写入注意事项
 
