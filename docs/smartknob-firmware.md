@@ -2,9 +2,9 @@
 
 ## 目标与边界
 
-SmartKnob 触感环和用户交互全部运行在 STM32 固件中：ControlTask 以 1 kHz 读取本机机械角度和速度、更新 detent 状态机并直接给出 q 轴电流目标；MaintenanceTask 识别按键并绘制 OLED。本地菜单直接切换预设和参数，不需要上位机。
+SmartKnob 触感环和用户交互全部运行在 STM32 固件中：ControlTask 以 1 kHz 读取本机机械角度和速度、更新 detent 状态机并直接给出 q 轴电流目标；MaintenanceTask 识别按键并绘制 OLED。本地菜单可以独立运行，现有 RollerCAN 上位机也可通过同一固件状态临时取得控制权。
 
-原有约 18.67 kHz FOC 电流环由 TIM1 更新中断启动编码器 DMA，并在 DMA2 RX 完成 ISR 内接续本周期 FOC；SmartKnob 不修改电流环和 PWM 实现。CAN/I2C 协议实现仍保留，但本地启动路径不初始化 FDCAN，也不创建 CommunicationTask。
+原有约 18.67 kHz FOC 电流环由 TIM1 更新中断启动编码器 DMA，并在 DMA2 RX 完成 ISR 内接续本周期 FOC；SmartKnob 不修改电流环和 PWM 实现。FDCAN 与 CommunicationTask 始终启用，CAN 命令仍通过静态队列交给 ControlTask，I2C 桥接留在通信任务。
 
 ## 模块
 
@@ -15,8 +15,10 @@ SmartKnob 触感环和用户交互全部运行在 STM32 固件中：ControlTask 
 | `MyFile/src/smart_knob_modes.c` | 每个模式独立的预设参数表 |
 | `MyFile/src/smart_knob.c` | 1 kHz detent/endstop/current 算法、在线配置和遥测快照 |
 | `MyFile/src/local_ui.c` | 仪表盘、菜单、按键事件和旋钮光标交互 |
-| `MyFile/src/mysys.c` | 本地 profile 加载、应用、保存和启停边界 |
-| `Core/Src/fdcan.c` | 保留的 CAN function 与主动遥测实现，当前入口不启用 |
+| `MyFile/src/mysys.c` | 本地 profile、主机控制权、事务快照、保存和启停边界 |
+| `MyFile/src/host_control.c` | 纯 C 命令分类、配置事务和 3 秒超时状态机 |
+| `MyFile/src/smart_knob_persistence.c` | 512 字节显式序列化与 CRC32 |
+| `Core/Src/fdcan.c` | CAN function、CAN-I2C 桥接与主动遥测 |
 
 默认 SmartKnob 预设只需要修改：
 
@@ -25,7 +27,7 @@ SmartKnob 触感环和用户交互全部运行在 STM32 固件中：ControlTask 
 #define SMART_KNOB_DEFAULT_MODE SMART_KNOB_MODE_COARSE_STRONG
 ```
 
-固件固定以 `MODE_DIAL` 本地运行。Flash 中不存在合法本地 profile 时使用 `COARSE_STRONG / 100% / 450 mA / 8°`；从菜单保存后，模式、力度、挡位角和电流上限在下次上电自动恢复。
+固件固定以 `MODE_DIAL` 本地运行。Flash 中不存在合法本地 profile 时使用与上位机 `rollercan.rs` 对齐的 `COARSE_STRONG / 100% / 450 mA / 10°`；完整快照会恢复所有 12 个模式和 Custom 参数。
 
 ## 内置模式
 
@@ -50,13 +52,13 @@ SmartKnob 触感环和用户交互全部运行在 STM32 固件中：ControlTask 
 
 ## 本地 profile 与菜单导航
 
-`smart_knob_mode_apply_local_profile()` 每次先从只读预设重建活动配置，再应用本地调整，避免反复进入菜单后比例累计：
+旧 48 字节迁移仍使用 `smart_knob_mode_apply_local_profile()` 从冻结预设重建一个模式。正常菜单保存改用带 dirty mask 的 `smart_knob_mode_apply_local_edit()`，只覆盖用户实际编辑的字段：
 
 - `FORCE`：25～125%，以 5% 为步进缩放预设的 `current_scale_a`。
 - `STEP`：1～60°，以 1° 为步进覆盖挡位宽度。
 - `LIMIT`：100～450 mA，以 50 mA 为步进限制 SmartKnob 电流。
 
-菜单使用私有模式 `SMART_KNOB_NAVIGATION_MODE = 0xFF`。它提供 12°、双向无边界的轻挡位，只用于光标和数值交互，不计入 12 个用户预设，也不会覆盖用户模式的位置状态。退出菜单后才一次性应用用户 profile。
+菜单使用私有模式 `SMART_KNOB_NAVIGATION_MODE = 0xFF`。它提供 12°、双向无边界的轻挡位，只用于光标和数值交互，不计入 12 个用户预设，也不会覆盖用户模式的位置状态。上位机接管时会取消草稿并立即退出该模式。
 
 ## 电流计算和保护
 
@@ -78,9 +80,9 @@ current = current_scale * pid + friction_current + click_current
 - idle detent-center correction 只用于无边界旋钮；有 min/max 的挡位保持固定中心网格，慢速停留不会让虚拟挡位中心追随手的位置。
 - 编码器单步不连续或进入 Dial 后 300 ms 稳定期内，电流目标归零。无效样本仍会推进原始位置基线，连续两个合理样本后重新同步滤波位置，因此单次跳变或真实高速转动不会永久锁死触感输出。
 
-## 保留的 CAN 参数接口（当前不启用）
+## CAN 参数接口
 
-以下接口用于说明源码中保留的兼容能力。当前本地入口不初始化 FDCAN、不创建 CommunicationTask，正常运行不会发送遥测或接受这些命令。
+以下接口由固定 1/5 Mbit/s CAN-FD+BRS 运行路径直接提供。只读发现不接管；第一个受支持写命令接管本地编辑，之后所有有效本机报文刷新 3 秒超时。
 
 仍使用原协议的 function read/write：`cmd=0x11` 读取，`cmd=0x12` 写入；function index 位于 `data[0..1]`，写值或读回值位于 `data[4..7]`，均为 little-endian `int32`。
 
@@ -134,7 +136,7 @@ current = current_scale * pid + friction_current + click_current
 
 ## 主动遥测帧
 
-每个采样周期主动发送两帧 Classic CAN 扩展帧。ID 布局为：
+每个采样周期主动发送两帧 8 字节 CAN-FD+BRS 扩展帧。ID 布局为：
 
 ```text
 bits 28..24  cmd: 0x17=logical state, 0x18=motion/current
@@ -164,17 +166,19 @@ bits 7..0    destination host ID
 
 bit1 来自 FOC 电流环的实际使能状态，而不是上位机最后写入的开关请求；因此过压保护关闭驱动后，bit1 会清零。bit7 可直接区分过压与其他 fault，输入电压仍可通过原协议 `0x7034` 读取。
 
-## 恢复 CAN 后的参考上位机启动顺序
+## 上位机启动与停止顺序
 
 ```text
-write 0x8001 = preset index       先选活动模式
+write 0x7004 = 0                  先失能
+write 0x7006 = 0                  清零电流目标
+write 0x8001 = preset index       选择活动模式并开始配置事务
 write 0x8201..0x820E              若为 Custom，更新配置
 write 0x8101..0x8107              更新当前模式手感和安全参数
-write 0x7005 = 4                  进入 MODE_DIAL
 write 0x8004 = host id
 write 0x8003 = telemetry Hz
 write 0x8002 = 1                  打开主动遥测
+write 0x7005 = 4                  进入 MODE_DIAL
 write 0x7004 = 1                  打开电机输出
 ```
 
-停止电机使用 `0x7004 = 0`。遥测开关独立于电机输出，可继续上报停止状态，也可以由上位机写 `0x8002 = 0` 关闭。
+正常停止顺序是先写 `0x7006 = 0`，再写 `0x7004 = 0`。成功 Dial 使能之前的配置只在 RAM 中暂存，断线会回退；成功使能后 Stop 会保存完整快照。Stop 不释放 OLED 控制权，只有页面停止通信或总线静默 3 秒才释放。遥测开关独立于电机输出，可继续上报停止状态，也可以由上位机写 `0x8002 = 0` 关闭。

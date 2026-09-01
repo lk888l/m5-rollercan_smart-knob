@@ -14,7 +14,7 @@
 - ADC DMA 保持 circular 搬运，但关闭未使用的 half-transfer 和 transfer-complete IRQ。
 - FDCAN ISR 只唤醒 CommunicationTask，不在中断中读取 FIFO、解析协议或发送回复。
 - `Loop_Control()`、速度/位置 PID、保护状态机和 SmartKnob 统一在 1 kHz ControlTask 中执行。
-- 按键模式切换通过容量为 8 的静态控制命令邮箱提交，不再由 MaintenanceTask 直接修改 `motor_mode`。
+- 本地菜单进入、带 dirty mask 的保存退出和双击启停通过容量为 8 的静态控制命令邮箱提交，不再由 MaintenanceTask 直接修改控制状态。
 - Flash 写回拆到 StorageTask，并在 `SYS_RUNNING` 时延后。
 - TLE5012B 改为 DMA2 Channel 1 RX + Channel 2 TX 的两字 normal 传输；TIM1 启动事务，RX 完成 ISR 提交同周期角度并接续 FOC，异常时保留上次有效角度。
 - `FastControlCommandSnapshot` 将驱动模式和 Iq 目标提交到 FOC 周期边界执行。
@@ -25,7 +25,7 @@
 - 本机 CAN 命令经固定容量队列交给 ControlTask，回复再经独立静态队列返回 CommunicationTask。
 - CAN-I2C 桥接命令 `19–22` 只在 CommunicationTask 执行，不再阻塞 1 kHz 控制任务。
 - FDCAN TX 只由 CommunicationTask 调用；启动调度器前的同步兼容路径除外。
-- CAN ID/波特率重配置也由 CommunicationTask 执行；StorageTask 只消费持久化标志。
+- CAN ID 重配置由 CommunicationTask 执行；波特率写命令固定应答索引 0，StorageTask 只消费持久化标志和完整快照。
 
 ## 任务配置
 
@@ -89,7 +89,7 @@ FDCAN ISR
 
 命令和回复队列容量均为 8。CommunicationTask 每次最多读取 16 帧；ControlTask 每个 pass 最多执行 4 条本机命令。FDCAN new-message 和 message-lost notification 都已启用。
 
-CAN ID 或波特率变更的回复发送完成后，CommunicationTask 才会 DeInit/重新初始化 FDCAN，并设置延后写回标志。MaintenanceTask 和 StorageTask 不再操作 FDCAN handle。
+CAN ID 变更的回复发送完成后，CommunicationTask 才会 DeInit/重新初始化 FDCAN，并设置延后写回标志。波特率请求不再触发重配置；MaintenanceTask 和 StorageTask 不操作 FDCAN handle。
 
 ## FOC / ControlTask 双向快照
 
@@ -186,8 +186,8 @@ FDCAN IRQ 优先级为 6，满足 `configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY=
 
 - FDCAN ISR：只通知 CommunicationTask。
 - CommunicationTask：解码帧并排队，不直接修改本机 PID、模式或保护状态。
-- MaintenanceTask 按键：向静态邮箱提交 `APP_CONTROL_COMMAND_CYCLE_MODE`。
-- 开机阻塞式 OLED 配置菜单：发生在调度器启动前，可直接设置启动配置。
+- MaintenanceTask 按键：向静态邮箱提交菜单进入、完整编辑结构保存或启停命令。
+- 非阻塞 OLED 菜单：只维护草稿和导航，应用配置与 Flash 调度仍由 ControlTask 完成。
 
 I2C 从机 `Slave_Complete_Callback()` 仍会直接写控制状态，是明确保留的未迁移边界。后续深化 I2C 时，应把寄存器事务解码成同一控制命令邮箱，而不是在 I2C ISR/回调中直接操作 PID 和电机状态。
 
@@ -202,7 +202,7 @@ I2C 从机 `Slave_Complete_Callback()` 仍会直接写控制状态，是明确�
 5. `fast_sensor_read_failure_count` 保持 0；ADC DMA 持续更新，编码器 DMA 的 error/overlap/stale/unexpected 计数和 `encoder_spi_timeout_count` 均不增加。
 6. 连续 CAN 通信时四个 drop/loss 计数保持 0，三个 queue/FIFO high-water 不触顶。
 7. 本机控制流量下 `runtime_can_frame_max_cycles` 稳定；桥接流量只影响 `runtime_can_bridge_max_cycles`。
-8. `app_control_command_drop_count` 保持 0，长按切换模式每次只切换一次。
+8. `app_control_command_drop_count` 保持 0，长按进入菜单、双击确认/启停均只触发一次。
 9. 分别验证速度、位置、电流、Dial/SmartKnob 四种模式；重点确认启停瞬间没有非预期电流。
 10. 验证编码器校准、过压、位置越界、速度堵转、位置堵转和自动恢复状态机。
 11. 运行各模式和 CAN 压力一段时间后读取四个 `app_*_stack_min_words`，再决定是否缩栈。

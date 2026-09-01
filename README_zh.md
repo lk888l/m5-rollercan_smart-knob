@@ -2,9 +2,9 @@
 
 [English](README.md) | 简体中文
 
-这是 M5 Stack RollerCAN 的本地直运行 SmartKnob 固件，基于 M5 的[官方开源固件](https://github.com/m5stack/M5Unit-RollerCAN-Internal-FW)修改。FOC、触感状态机、模式切换、参数设置和 OLED 都在 STM32G431 上完成，不需要 CANFD 上位机参与运行。
+这是 M5 Stack RollerCAN 的本地自主运行 SmartKnob 固件，基于 M5 的[官方开源固件](https://github.com/m5stack/M5Unit-RollerCAN-Internal-FW)修改。FOC、触感状态机、模式切换、参数设置和 OLED 都在 STM32G431 上完成；原有 RollerCAN CAN-FD 上位机可临时取得更高优先级，同时保留本地显示。
 
-旧 I2C/CANFD 协议代码仍保留作参考，但当前入口不会初始化 FDCAN，CAN 收发任务也不会创建，外部收发器保持 standby。
+固件以固定的 1 Mbit/s 仲裁段、5 Mbit/s 数据段初始化 FDCAN 和 CommunicationTask。只读发现不影响本地操作；发给本机的第一个受支持写命令触发接管，连续 3 秒没有有效报文后自动释放。
 
 固件的核心职责是：
 
@@ -14,7 +14,7 @@
 - 通过旋钮挡位、长按和双击操作本地菜单。
 - 在 64×48 SSD1306 OLED 上显示圆形速度表、挡位、模式和告警。
 - 用稳定的 RGB 呼吸/常亮/双闪区分运行、暂停、菜单、保存和故障。
-- 将模式、力度、挡位角、电流上限和编码器 offset 保存到片内 Flash。
+- 将 12 个模式的完整 tuning、Custom 配置、本地字段、CAN ID 和编码器 offset 保存到片内 Flash。
 
 ## 快速入口
 
@@ -26,7 +26,7 @@
 | [构建与烧录](docs/build-and-flash.md) | CMake/MDK 工程、工具链、构建命令、产物 |
 | [外设与引脚](docs/peripherals.md) | TIM/ADC/SPI/I2C/FDCAN/GPIO/DMA 的用途 |
 | [控制链路](docs/control-loop.md) | FOC、电流环、速度环、位置环、电流模式、Dial 模式 |
-| [固件 SmartKnob](docs/smartknob-firmware.md) | 本地预设、运行配置、导航挡位、电流限制和旧 CAN 接口参考 |
+| [固件 SmartKnob](docs/smartknob-firmware.md) | 本地预设、运行配置、导航挡位、电流限制和 CAN 上位机接口 |
 | [通信协议](docs/communication-protocol.md) | I2C 寄存器表、CAN 命令、CAN-I2C 桥接 |
 | [显示与输入](docs/display-and-input.md) | 圆形仪表盘、本地菜单、长按/双击、参数范围和安全边界 |
 | [持久化配置](docs/persistence.md) | Flash 数据布局、编码器 offset 保存、读写时机、保护状态保存 |
@@ -56,7 +56,7 @@ STM32G431XX_FLASH.ld  CubeMX 生成的默认链接脚本，CMake 不使用
 
 ## 一句话运行图
 
-`main()` 完成外设初始化和 `InitMysys()` 后启动 FreeRTOS。1 kHz ControlTask 独占保护状态机、SmartKnob 和本机控制状态；MaintenanceTask 负责按键、OLED 和灯效；StorageTask 在电机卸力后保存本地配置。当前不创建 CommunicationTask。TIM1 中断以约 18.67 kHz 启动编码器 DMA，DMA2 RX 完成中断提交同周期角度并接续 FOC。
+`main()` 完成外设初始化和 `InitMysys()` 后启动 FreeRTOS。1 kHz ControlTask 独占保护状态机、SmartKnob、本机状态和上位机命令；MaintenanceTask 负责按键、OLED 和灯效；CommunicationTask 负责 CAN 收发；StorageTask 仅在电机卸力后写入完整快照。TIM1 中断以约 18.67 kHz 启动编码器 DMA，DMA2 RX 完成中断提交同周期角度并接续 FOC。
 
 ```text
 上电
@@ -65,10 +65,11 @@ STM32G431XX_FLASH.ld  CubeMX 生成的默认链接脚本，CMake 不使用
   -> InitMysys
        -> ADC DMA / TIM1 PWM / 电机驱动 / 编码器 / Flash 本地配置 / OLED
        -> 加载编码器 offset 后重置多圈跟踪并锚定当前触感中心
-       -> 启动本地 Dial 输出，CAN 收发器保持 standby
+       -> 启动本地 Dial 输出，并启用固定时序的 CAN-FD 接口
   -> App_StartScheduler
        -> ControlTask: 1 kHz 外环、保护、SmartKnob 和本机命令执行
        -> MaintenanceTask: 长按/双击、仪表盘、本地菜单和灯效
+       -> CommunicationTask: CAN-FD 收发、响应和遥测
        -> StorageTask: 安全状态下的 Flash 写回
 
 TIM1_UP_TIM16_IRQHandler
@@ -91,7 +92,7 @@ DMA2_Channel1_IRQHandler
 
 ## CAN FD 总线配置
 
-以下内容是保留的旧协议参考。当前本地直运行入口不调用 `MX_FDCAN1_Init()`，也不创建 CommunicationTask；如需恢复总线控制，需要同时恢复外设初始化和通信任务。
+CAN-FD 接口始终启用，并与现有 RollerCAN 上位机保持线协议兼容。Flash 中的节点 ID 会保留（默认 `0xA8`），运行时固定 `comm_type=COMM_TYPE_CAN`、`bps_index=0`。
 
 默认 `bps_index=0` 时，固件 CAN 总线配置与以下命令精确一致：
 
@@ -105,9 +106,8 @@ FDCAN 使用由 160 MHz 系统 PLL 分频得到的 80 MHz PLLQ 时钟。仲裁�
 精确得到 5 Mbit/s 和 75% 采样点。协议发送帧为开启速率切换的 8 字节
 CAN FD 扩展 ID 帧。
 
-原有波特率选项仍然保留：`bps_index=1` 和 `bps_index=2` 只会将仲裁段
-分别改为 500 kbit/s 和 125 kbit/s，此时上位机 CAN 接口也必须使用相同
-仲裁速率；数据段仍保持 5 Mbit/s。
+为兼容旧命令，固件仍应答波特率写请求，但运行时不会离开 1/5 Mbit/s，
+避免节点被误改到上位机无法访问的时序。
 
 PLL、FDCAN 位时序、TIM1 和 TIM3 参数也已写入 `ROLLERCAN.ioc`，因此使用
 STM32CubeMX 重新生成工程时会保留这些设置。系统时钟从 168 MHz 调整到
@@ -179,6 +179,14 @@ arm-none-eabi-objcopy -O binary ROLLERCAN.elf ROLLERCAN.bin
 | 整片擦除、设备上没有 bootloader，需要直接冷启动 | `build/<Debug或Release>/ROLLERCAN_standalone.hex` | 同时写入 `0x08000000` 的向量镜像和 `0x08002000` 的应用；每次更新都应重新烧完整 standalone HEX |
 
 最常见的选择是：保留原版启动程序时烧 `ROLLERCAN.hex`；开发板整片擦除后独立运行时烧 `ROLLERCAN_standalone.hex`。`ROLLERCAN.bin` 本身不包含地址，只有在烧录工具中明确填写 `0x08002000` 才能使用。仓库中 `MDK-ARM/ROLLERCAN/` 下的文件是旧 MDK 构建产物，不应代替当前 `build/Debug` 或 `build/Release` 里的 CMake 产物。
+
+## 上位机兼容与 `*` 含义
+
+Ping 和 function read 只用于发现，不会锁住本地操作。收到第一个受支持的本机写命令后，上位机取得控制权；若本地菜单已打开，未保存草稿会被取消。接管期间 OLED 仍实时显示模式、位置、转动和故障，底部显示 `HOST CONNECTED`，本地菜单和双击启停均被忽略。Ping、读和写都会刷新连接；连续 3 秒静默后释放。
+
+固件按“失能 → 电流清零 → 选择/配置模式 → Dial → 使能”识别上位机启动事务。未成功使能的半成品不保存。Stop 后只要上位机仍有报文，OLED 继续锁定且电机保持关闭；Stop 或断线会保存已成功使能的完整触感快照。断线恢复运行/暂停状态前必须完成 Flash 写入和回读，任何保护故障都阻止自动使能。
+
+`HOST CONNECTED*` 表示当前完整配置有效且会原样保留，但其中有值无法由 OLED 的四项基础编辑器精确表达。对应数值页直接显示 `*`，第一次旋转会从最接近的本地合法值开始。本地 SAVE 只覆盖实际编辑过的字段，隐藏的 P/D、摩擦、click 等高级参数继续保留，所以全局 `*` 可能仍然存在。
 
 ## 维护原则
 

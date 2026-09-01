@@ -108,3 +108,16 @@ void button_update(void)
     my_button.was_click = 1U;
   }
 }
+
+void button_cancel_events(void)
+{
+  button_click_pending = 0U;
+  if (my_button.is_pressed) {
+    button_long_reported = 1U;
+  }
+  my_button.was_click = 0U;
+  my_button.was_double_click = 0U;
+  my_button.was_longpress = 0U;
+  my_button.was_longlongpress = 0U;
+  my_button.is_longlongpressed = 0U;
+}

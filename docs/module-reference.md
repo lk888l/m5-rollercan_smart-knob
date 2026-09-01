@@ -16,10 +16,10 @@
 | --- | --- |
 | `IAP_Set()` | `main()` 最早调用，将 `SCB->VTOR` 指向完整应用向量表 |
 | `micros()` | 基于 SysTick 和 HAL tick 生成微秒时间，PID/SmartKnob 使用 |
-| `init_flash_data()` | 启动时读取 Flash 或写入默认配置 |
+| `init_flash_data()` | 启动时读取 Flash 实际长度；无页面时只建立 RAM 默认前缀 |
 | `flash_data_write_back()` | 保存当前配置到 Flash |
 | `Slave_Complete_Callback()` | I2C 完整事务回调，解析寄存器读写 |
-| `main()` | 初始化本地运行所需外设、保持 CAN standby，调用 `InitMysys()` 和 `App_StartScheduler()` |
+| `main()` | 初始化基础外设、在读取 CAN ID 前短暂保持 standby，调用 `InitMysys()` 和 `App_StartScheduler()` |
 
 ## `MyFile/src/mysys.c`
 
@@ -129,16 +129,35 @@
 
 运行：
 
-- `init_smart_knob()` 在上电加载本地预设时调用。
+- `init_smart_knob()` 在上电加载本地预设、切换模式和安全恢复输出时调用。
 - `handle_smart_knob()` 由 1 kHz ControlTask 的 Dial 分支调用。
 - `smart_knob_enter_navigation_mode()` 进入私有 `0xFF` 菜单导航挡位。
 - `current_position` 是正常挡位位置；导航期间 LocalUi 读取其增量作为光标输入。
+
+## `MyFile/src/smart_knob_modes.c`
+
+- 保存与上位机 `rollercan.rs` 冻结表一致的 12 个默认预设。
+- 导入/导出 12×（宽度+7 tuning）和 Custom 14 项的完整 RAM 快照。
+- 将活动模式投影为 OLED 的 MODE/FORCE/STEP/LIMIT，并报告不可表达字段 mask。
+- `smart_knob_mode_apply_local_edit()` 只覆盖 dirty 字段，保留隐藏高级参数。
+
+## `MyFile/src/host_control.c`
+
+- 纯 C 分类 Ping/read/write/bridge，不依赖 HAL。
+- 识别 disable → current zero → config → Dial → enable 事务，以及 current zero → disable Stop。
+- 记录接管前输出状态并在最后有效报文 3000 ms 时产生 timeout 事件。
+
+## `MyFile/src/smart_knob_persistence.c`
+
+- 显式 little-endian 编解码 512 字节 Flash data 区，不保存原始 C 结构体。
+- 校验 magic、版本、模式数、payload 长度、当前模式和 CRC32。
+- 编码时从 byte 48 开始写，保证前 48 字节降级兼容投影不被破坏。
 
 ## `MyFile/src/local_ui.c`
 
 职责：
 
-- 绘制 64×48 圆形速度表、挡位位置、模式和故障覆盖层。
+- 绘制 64×48 圆形速度表、挡位位置、模式、故障覆盖层和 `HOST CONNECTED[*]`。
 - 管理 `MODE/FORCE/STEP/LIMIT/SAVE` 菜单状态机。
 - 把长按、双击和旋钮挡位变化转换成本机控制命令。
 
@@ -183,19 +202,19 @@
 
 运行：
 
-当前本地入口不调用 `MX_FDCAN1_Init()`，`comm_type` 固定为 `COMM_TYPE_NONE`，CommunicationTask 不创建。以下是恢复旧总线功能时才会进入的路径：
+当前入口在加载保存的 CAN ID 后调用 `user_fdcan_init()`，固定 `comm_type=COMM_TYPE_CAN`、`bps_index=0` 并创建 CommunicationTask。运行路径如下：
 
-- `user_fdcan_init()` 按 `can_id` 和 `bps_index` 设置 filter 和波特率。
+- `user_fdcan_init()` 按保存的 `can_id` 设置 filter，并强制 1/5 Mbit/s CAN-FD+BRS 时序。
 - `HAL_FDCAN_RxFifo0Callback()` 只通知 CommunicationTask 并记录 FIFO loss。
 - CommunicationTask 调用 `FDCAN_ReadPendingCommand()`，将本机命令排队给 ControlTask；命令 `19–22` 的桥接操作留在 CommunicationTask。
 - ControlTask 调用 `FDCAN_ProcessCommand()` 修改本机状态，并将回复排队回 CommunicationTask。
-- CAN ID/波特率重配置由 CommunicationTask 执行，Flash 保存由 StorageTask 延后完成。
+- CAN ID 重配置由 CommunicationTask 执行，Flash 保存由 StorageTask 延后完成；波特率写命令兼容应答但始终保持 1/5 Mbit/s。
 
 ## `Core/Src/flash.c`
 
 职责：
 
-- 片内 Flash page 59 的简单 EEPROM 包格式。
+- 片内 Flash page 59 的 EEPROM 包格式，512 字节 data 区包含兼容前缀和版本化 CRC32 快照。
 - 读、写、检查 package head 和 length。
 
 运行：

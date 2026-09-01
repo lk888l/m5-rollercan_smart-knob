@@ -73,7 +73,7 @@ void MX_FDCAN1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN FDCAN1_Init 2 */
-  /* 配置过滤器以接收经典 CAN 帧 */
+  /* Filter this node's extended CAN-FD command frames by destination ID. */
   FDCAN_FilterTypeDef sFilterConfig;
   sFilterConfig.FilterIndex = 0;
   sFilterConfig.IdType = FDCAN_EXTENDED_ID;
@@ -178,8 +178,7 @@ void user_fdcan_init(void)
 {
 
   /* USER CODE BEGIN FDCAN1_Init 0 */
-  if (bps_index > 2)
-    bps_index = 2;
+  bps_index = 0U;
   /* USER CODE END FDCAN1_Init 0 */
 
   /* USER CODE BEGIN FDCAN1_Init 1 */
@@ -192,7 +191,7 @@ void user_fdcan_init(void)
   hfdcan1.Init.AutoRetransmission = DISABLE;
   hfdcan1.Init.TransmitPause = DISABLE;
   hfdcan1.Init.ProtocolException = DISABLE;
-  hfdcan1.Init.NominalPrescaler = bps_list[bps_index];
+  hfdcan1.Init.NominalPrescaler = 1;
   hfdcan1.Init.NominalSyncJumpWidth = 5;
   hfdcan1.Init.NominalTimeSeg1 = 63;
   hfdcan1.Init.NominalTimeSeg2 = 16;
@@ -208,7 +207,7 @@ void user_fdcan_init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN FDCAN1_Init 2 */
-  /* 配置过滤器以接收经典 CAN 帧 */
+  /* Filter this node's extended CAN-FD command frames by destination ID. */
   FDCAN_FilterTypeDef sFilterConfig;
   sFilterConfig.FilterIndex = 0;
   sFilterConfig.IdType = FDCAN_EXTENDED_ID;
@@ -321,6 +320,13 @@ bool FDCAN_ReadPendingCommand(CanProtocolCommand *command)
                              &rx_header, command->data) != HAL_OK) {
     return false;
   }
+  if (rx_header.IdType != FDCAN_EXTENDED_ID ||
+      rx_header.RxFrameType != FDCAN_DATA_FRAME ||
+      rx_header.DataLength != FDCAN_DLC_BYTES_8 ||
+      rx_header.FDFormat != FDCAN_FD_CAN ||
+      rx_header.BitRateSwitch != FDCAN_BRS_ON) {
+    return false;
+  }
 
   command->command_id = identifier_to_cmd(rx_header.Identifier);
   command->command_parameter = identifier_to_cmd_para(rx_header.Identifier);
@@ -405,8 +411,10 @@ void FDCAN_ServiceReconfiguration(void)
   }
 
   if (reconfigure) {
+    HAL_GPIO_WritePin(CAN_STB_GPIO_Port, CAN_STB_Pin, GPIO_PIN_SET);
     HAL_FDCAN_DeInit(&hfdcan1);
     user_fdcan_init();
+    HAL_GPIO_WritePin(CAN_STB_GPIO_Port, CAN_STB_Pin, GPIO_PIN_RESET);
     flash_data_write_back_flag = 1U;
   }
 }
@@ -447,12 +455,18 @@ bool FDCAN_ProcessCommand(const CanProtocolCommand *command,
       case 3:
         motor_output = 1;
         if (motor_output) {
-          if (!over_vol_flag && !err_stalled_flag && motor_mode < MODE_MAX) {
+          if (error_code == ERR_NONE && !over_vol_flag && !err_stalled_flag &&
+              !over_value_flag && !MysysLocalSaveError() &&
+              motor_mode < MODE_MAX) {
             if (motor_mode == MODE_DIAL && motor_disable_flag) {
               init_smart_knob();
             }             
             motor_disable_flag = 0;
             MotorDriverSetMode(MDRV_MODE_RUN);
+          } else {
+            motor_output = 0U;
+            motor_disable_flag = 1U;
+            MotorDriverSetMode(MDRV_MODE_OFF);
           }
         }
         else {
@@ -522,11 +536,9 @@ bool FDCAN_ProcessCommand(const CanProtocolCommand *command,
         FDCAN_SetResponse(response, 2, my_tx_option, option, data);
         break;
       case 11:
-        if (cmd_para <= 2) {
-          change_baudrate_flag = 1;
-          change_baudrate_delay = HAL_GetTick();
-          bps_index = cmd_para;
-        }         
+        /* RollerCAN host compatibility has one fixed CAN-FD+BRS timing:
+           1 Mbit/s nominal and 5 Mbit/s data. */
+        bps_index = 0U;
         my_tx_option = (option | (bps_index << 8));
         FDCAN_SetResponse(response, cmd_id, my_tx_option, can_id, data);
         break;
@@ -756,13 +768,13 @@ bool FDCAN_ProcessCommand(const CanProtocolCommand *command,
         switch (func_index)
         {
         case FUNC_SAVE_FLASH:
-          if (abs(func_data)) {
+          if (func_data != 0) {
             flash_data_write_back_flag = 1;
           }
 
           break;
         case FUNC_REMOVE_PROTECTION:
-          if (abs(func_data)) {
+          if (func_data != 0) {
             speed_err_recover_try_counter = 0;
             pos_err_recover_try_counter = 0;
             if (motor_mode == MODE_SPEED_ERR_PROTECT) {
@@ -783,14 +795,20 @@ bool FDCAN_ProcessCommand(const CanProtocolCommand *command,
 
           break;
         case FUNC_ON_OFF:
-          motor_output = abs(func_data);
+          motor_output = func_data != 0;
           if (motor_output) {
-            if (!over_vol_flag && !err_stalled_flag && motor_mode < MODE_MAX) {
+            if (error_code == ERR_NONE && !over_vol_flag && !err_stalled_flag &&
+                !over_value_flag && !MysysLocalSaveError() &&
+                motor_mode < MODE_MAX) {
               if (motor_mode == MODE_DIAL && motor_disable_flag) {
                 init_smart_knob();
               }            
               motor_disable_flag = 0;
               MotorDriverSetMode(MDRV_MODE_RUN);
+            } else {
+              motor_output = 0U;
+              motor_disable_flag = 1U;
+              MotorDriverSetMode(MDRV_MODE_OFF);
             }
           }
           else {
@@ -800,7 +818,7 @@ bool FDCAN_ProcessCommand(const CanProtocolCommand *command,
 
           break;
         case FUNC_OVERVOLTAGE_PROTECTION_RELEASE_MODE:
-          over_vol_protect_mode = abs(func_data) != 0;
+          over_vol_protect_mode = func_data != 0;
           if (!over_vol_protect_mode) {
             over_vol_protect_auto_flag = 0U;
           }
@@ -1192,9 +1210,20 @@ void FDCAN_ProcessPending(void)
   CanProtocolCommand command;
   CanProtocolResponse response;
 
-  if (FDCAN_ReadPendingCommand(&command) &&
-      FDCAN_ProcessCommand(&command, &response) && response.valid) {
-    FDCAN_SendResponse(&response);
+  if (!FDCAN_ReadPendingCommand(&command)) {
+    return;
+  }
+
+  if (!FDCAN_IsBridgeCommand(&command)) {
+    MysysHostCommandBegin(&command);
+  }
+  const bool command_valid =
+      FDCAN_ProcessCommand(&command, &response) && response.valid;
+  if (!FDCAN_IsBridgeCommand(&command)) {
+    MysysHostCommandEnd(&command, command_valid);
+  }
+  if (command_valid) {
+    (void)FDCAN_SendResponse(&response);
   }
 }
 

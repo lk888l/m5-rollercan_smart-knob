@@ -11,7 +11,7 @@
 | 2 | `COMM_TYPE_CAN` | 本机启用 CAN 协议 |
 | 3 | `COMM_TYPE_CAN_I2C` | 本机同时启用 I2C 和 CAN，CAN 可桥接 I2C |
 
-启动时 `InitMysys()` 读取 Flash 中保存的 `comm_type`，然后选择初始化路径。page 59 没有有效配置时默认使用 `COMM_TYPE_CAN`；没有版本标记的旧配置会先在 RAM 中迁移到 CAN，版本标记随下一次正常配置保存写入。标记写入后，用户显式保存的通信模式仍优先。
+当前产品运行时固定使用 `COMM_TYPE_CAN`。`InitMysys()` 仍读取旧布局以迁移编码器、PID 和 CAN ID，但会覆盖旧 `comm_type` 与 `bps_index`，随后以 1 Mbit/s 仲裁段、5 Mbit/s 数据段启动 FDCAN。I2C 桥接命令 `19–22` 保留，且不会触发本机 OLED 控制权接管。
 
 ## I2C 从机协议
 
@@ -74,7 +74,7 @@ I2C 从机由 `Core/Src/i2c_ex.c` 处理收发，中断完成后回调 `Core/Src
 
 ## CAN 扩展帧格式
 
-CAN 使用 Classic frame、Extended ID、8 字节数据。发送 ID 由 `FDCAN1_Send_Msg()` 生成：
+CAN 使用 CAN-FD、BRS、Extended ID 和 8 字节数据；接收路径会拒绝格式、BRS、ID 类型或 DLC 不匹配的帧。发送 ID 由 `FDCAN1_Send_Msg()` 生成：
 
 ```text
 identifier = (cmd_id << 24) | (option << 8) | can_id
@@ -89,7 +89,7 @@ identifier = (cmd_id << 24) | (option << 8) | can_id
 | `option` | `(id >> 8) & 0xFFFF` | 选项/事务号/状态字段 |
 | `can_id` | `id & 0xFF` | 节点 ID |
 
-注意：`HAL_FDCAN_RxFifo0Callback()` 中局部变量 `option` 当前声明为 `uint8_t`，而 `identifier_to_option()` 返回 `uint16_t`。阅读或扩展协议时应注意这个实现细节。
+接收队列保留完整的 16 位 `option`；现有命令处理器延续旧协议行为，使用其低 8 位作为事务/主机标识，高 8 位主要用于响应状态。
 
 ## CAN 命令表
 
@@ -101,7 +101,7 @@ identifier = (cmd_id << 24) | (option << 8) | can_id
 | 7 | ID 中 `cmd_para` | 设置本机 CAN ID，主循环随后重新初始化 CAN 并写 Flash |
 | 9 | 空 | 清除堵转保护状态 |
 | 10 | 空 | 请求保存 Flash |
-| 11 | ID 中 `cmd_para` | 设置波特率索引，延迟约 300ms 后重新初始化 CAN |
+| 11 | ID 中 `cmd_para` | 兼容应答；运行时仍固定返回索引 0（1/5 Mbit/s） |
 | 12 | 空 | 打开堵转保护 |
 | 13 | 空 | 关闭堵转保护 |
 | 14 | 空 | 打开位置越界保护 |
@@ -176,3 +176,24 @@ data[4..7] = int32 value
 `0x8001–0x8304` 为固件本地 SmartKnob 的模式、调参、主动遥测和状态读取 function。SmartKnob 打开主动遥测后，不需要上位机轮询角度或电流：固件会用 `cmd=0x17/0x18` 成对推送逻辑状态和运动/电流状态。
 
 完整的 function 表、缩放、帧字段、模式索引和推荐启动顺序见 [固件 SmartKnob](smartknob-firmware.md)。
+
+## 上位机控制权
+
+- `cmd=0` Ping 与 `cmd=17` function read 在未连接时只做发现，不接管 OLED。
+- 第一个受支持的本机写命令接管控制；CAN-I2C 桥接 `19–22` 不接管。
+- 接管后，本机 Ping、read、write 都刷新最后有效报文时间。
+- 连续 3000 ms 没有有效本机报文时释放控制权，并把遥测开关、速率和目标 host ID 恢复为固件默认值。
+- 上位机 Stop 不等于断开：只要报文继续到达，OLED 仍锁定，电机保持失能。
+
+上位机配置事务按以下顺序识别：
+
+```text
+write 0x7004 = 0
+write 0x7006 = 0
+write 0x8001 = mode
+write custom/tuning parameters
+write 0x7005 = MODE_DIAL
+write 0x7004 = 1
+```
+
+只有最后一次使能在无故障状态下真正成功，事务才成为可保存快照。启动中途掉线会恢复上一次有效快照；正常 Stop（先清零电流，再失能）或 3 秒断线会触发安全写回。

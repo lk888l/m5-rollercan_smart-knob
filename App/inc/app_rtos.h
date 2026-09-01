@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "can_protocol.h"
+#include "local_profile.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,6 +39,7 @@ extern volatile uint32_t app_can_response_queue_high_water;
 void App_StartScheduler(void);
 bool App_NotifyCanRxFromISR(void);
 bool App_PostControlCommand(AppControlCommandType type, int32_t value);
+bool App_PostLocalProfileEdit(const LocalProfileEdit *edit);
 bool App_PostCanControlCommand(const CanProtocolCommand *command);
 
 #ifdef __cplusplus

@@ -29,5 +29,6 @@ typedef struct
 extern button_t my_button;
 
 void button_update(void);
+void button_cancel_events(void);
 
 #endif

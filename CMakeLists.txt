@@ -48,7 +48,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 )
 
 # Collect user source files
-file(GLOB MYFILE_SOURCES "MyFile/src/*.c")
+file(GLOB MYFILE_SOURCES CONFIGURE_DEPENDS "MyFile/src/*.c")
 set(U8G2_SOURCES
     U8g2_lib/u8g2_bitmap.c
     U8g2_lib/u8g2_box.c

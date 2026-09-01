@@ -7,7 +7,7 @@
 1. `IAP_Set()` 将 `SCB->VTOR` 指向应用区 `0x08002000` 的完整向量表。不能只复制旧实现中的 48 个向量；DMA2 Channel 1/2 为 IRQ 56/57，必须保留更高编号的中断入口。
 2. `HAL_Init()` 初始化 HAL、SysTick 和 Flash 接口。
 3. `SystemClock_Config()` 使用 HSI+PLL 配置系统时钟。
-4. 依次初始化 GPIO、DMA、ADC1、TIM1、SPI1、TIM3 和 I2C1；将 CAN 收发器置于 standby，不初始化 FDCAN1。
+4. 依次初始化 GPIO、DMA、ADC1、TIM1、SPI1、TIM3 和 I2C1；在读取保存的节点 ID 之前暂时将 CAN 收发器置于 standby。
 5. `InitMysys()` 完成业务和电机硬件初始化。
 6. `sk6812_init(PIXEL_MAX)` 初始化静态 RGB 缓冲，`LocalRgbInitialize()` 初始化本地状态灯。
 7. `App_StartScheduler()` 创建全静态 FreeRTOS 对象并启动调度器；正常情况下不返回。
@@ -26,7 +26,7 @@
 8. 延时 20 ms 后执行 `MyADCZeroCal()`。
 9. 保持 TIM1 连续运行，等待并清除一个自然 repetition update，再开启 update IRQ。
 10. 读取 Flash 配置，加载编码器 offset 后重置多圈跟踪，避免 offset 生效前后的角度差被误计为旋转。
-11. 加载本地 SmartKnob profile，固定 `MODE_DIAL`/`COMM_TYPE_NONE`，初始化 OLED 仪表盘并自动启动力反馈。
+11. 加载/迁移完整 SmartKnob 快照，固定 `MODE_DIAL`、`COMM_TYPE_CAN`、`bps_index=0`，拉出 CAN standby 并以保存的 CAN ID 初始化 FDCAN，然后初始化 OLED 仪表盘并自动启动力反馈。
 
 顺序 4～9 不可随意交换。若 SPI1 和 DMA2 通道准备完成前开启 TIM1 update IRQ，首次编码器事务无法产生有效 DMA 完成事件。直接停表并从 CNT=0 重启中心对齐 TIM1 也可能保留下降方向并制造极短首周期，因此这里对齐到持续运行中的自然 update。
 
@@ -37,11 +37,11 @@
 | TIM1 update ISR | 约 18.67 kHz | 拉低编码器 CS 并启动 DMA2 RX/TX；不调用 FreeRTOS API |
 | DMA2 RX ISR | 每次编码器事务完成 | 提交本周期角度并运行 `Loop_FOC()`；不调用 FreeRTOS API |
 | ControlTask | 1 kHz + 控制邮箱唤醒 | `Loop_Control()`、模式控制、保护、SmartKnob 和本机命令执行 |
-| CommunicationTask | 条件创建 | 仅 `comm_type != COMM_TYPE_NONE` 时创建；当前本地配置不创建 |
+| CommunicationTask | CAN RX/TX 或遥测周期 | 当前固定创建；读取 FDCAN、排队本机命令、发送响应/遥测和处理桥接 |
 | MaintenanceTask | 10 ms | 非阻塞按钮事件、LocalUi、OLED 20 Hz 刷新、LocalRgb 状态灯与 DMA service |
 | StorageTask | 20 ms | 电机安全状态下的 Flash 写回 |
-| FDCAN ISR | 当前不启用 | 保留的旧协议入口；本地启动路径未初始化外设 |
-| I2C1 ISR/回调 | 当前无业务配置 | 旧从机协议源码保留，但 `COMM_TYPE_NONE` 不启动该通信路径 |
+| FDCAN ISR | RX FIFO 新帧/loss | 通知 CommunicationTask，不直接修改控制状态 |
+| I2C1 ISR/回调 | 当前无本机从机业务 | `COMM_TYPE_CAN` 不启动从机路径；CAN-I2C bridge 可按命令临时使用 I2C master |
 
 ## TIM1 快环
 
@@ -68,7 +68,7 @@ TIM1 使用 center-aligned PWM，repetition counter 为 2。PWM 和 ADC 触发�
 
 ```text
 ControlTask
-  -> 消费 LocalUi 提交的进入菜单、退出菜单、启停命令
+  -> 消费 LocalUi 和 CommunicationTask 提交的本机命令
   -> 到达 1 ms 截止时间
        -> Loop_Control
             -> 机械角度和速度估计
@@ -78,7 +78,7 @@ ControlTask
             -> MODE_DIAL / handle_smart_knob
 ```
 
-ControlTask 使用绝对 tick 截止时间，不会补跑多个过期控制步。菜单操作也只通过静态队列改变控制状态，OLED 绘制不会进入 1 kHz 控制路径。
+ControlTask 使用绝对 tick 截止时间，不会补跑多个过期控制步。菜单和 CAN 操作都只通过静态队列改变控制状态；每个 1 ms 控制步还检查上位机精确 3000 ms 超时，OLED 绘制不会进入该路径。
 
 ## 模式状态机
 
@@ -111,4 +111,4 @@ PC6 按键长按/双击
   -> 菜单光标移动或参数增减
 ```
 
-旧 CAN/I2C 命令解析仍在源码中，便于以后恢复兼容；当前入口不初始化 FDCAN、不创建 CommunicationTask，并把 `comm_type` 固定为 `COMM_TYPE_NONE`，因此运行不依赖外部总线。
+CAN 发现阶段不改变本地输入路径。第一个受支持本机写命令会取消菜单草稿并锁住后续本地命令；OLED 继续读取实时 `SmartKnobRuntimeState`。有效 Ping/read/write 维持接管，3 秒静默后恢复接管前运行/暂停状态；I2C 桥接命令不接管。

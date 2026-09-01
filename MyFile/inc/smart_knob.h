@@ -128,6 +128,7 @@ bool smart_knob_read_parameter(uint16_t index, int32_t *value);
 bool smart_knob_write_parameter(uint16_t index, int32_t value, uint8_t host_id);
 
 bool smart_knob_telemetry_enabled(void);
+void smart_knob_reset_connection_state(void);
 bool smart_knob_build_telemetry(uint32_t now_ms, SmartKnobTelemetryFrame *frame);
 bool smart_knob_get_runtime_state(SmartKnobRuntimeState *state);
 

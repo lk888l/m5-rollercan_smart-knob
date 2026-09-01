@@ -104,7 +104,8 @@ bool writeMessageToFlash( uint8_t *buff , uint16_t length)
     FLASH_EraseInitTypeDef My_Flash = {0};
     
     /*Protection*/
-    if( (length+4) > STM32G0xx_PAGE_SIZE )
+    if (length == 0U || isItOddNumber(length) ||
+        ((uint32_t)length + 8U) > STM32G0xx_PAGE_SIZE)
     {
         return false;
     }
@@ -144,15 +145,14 @@ bool writeMessageToFlash( uint8_t *buff , uint16_t length)
             return false;
         }
     }  
-    // if( isItOddNumber(length) )//Write one more if length is odd number.
-    // {        
-    //     temp = buff[0] | (uint64_t)buff[1]<<8 | (uint64_t)buff[2]<<16 | (uint64_t)buff[3]<<24\
-    //     | (uint64_t)buff[4]<<32 | (uint64_t)buff[5]<<40 | (uint64_t)buff[6]<<48 | (uint64_t)buff[7]<<56;
-    //     HAL_FLASH_Program(FLASH_TYPEPROGRAM_DOUBLEWORD, STM32G0xx_FLASH_PAGE59_STARTADDR+8, temp);
-    // }
-
-    
     /*Read out and check*/
+    if ((*(uint16_t *)STM32G0xx_FLASH_PAGE59_STARTADDR !=
+         EEPPROM_PACKAGEHEAD) ||
+        (*(uint16_t *)(STM32G0xx_FLASH_PAGE59_STARTADDR + 2U) != length))
+    {
+        HAL_FLASH_Lock();
+        return false;
+    }
     for(i=0 ;i<length ;i++)
     {
         if( *(uint8_t*)(STM32G0xx_FLASH_PAGE59_STARTADDR+8+i) != buff[i] )

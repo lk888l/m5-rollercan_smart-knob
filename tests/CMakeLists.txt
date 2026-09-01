@@ -88,3 +88,40 @@ else()
 endif()
 
 add_test(NAME local_rgb_state_machine COMMAND local_rgb_state_tests)
+
+add_executable(host_compatibility_tests
+    host_compatibility_tests.c
+    ../MyFile/src/host_control.c
+    ../MyFile/src/smart_knob.c
+    ../MyFile/src/smart_knob_modes.c
+    ../MyFile/src/smart_knob_persistence.c
+)
+
+target_compile_features(host_compatibility_tests PRIVATE c_std_11)
+target_include_directories(host_compatibility_tests PRIVATE
+    stubs
+    ../App/inc
+    ../MyFile/inc
+)
+
+if(MSVC)
+    target_compile_options(host_compatibility_tests PRIVATE /W4)
+else()
+    target_compile_options(host_compatibility_tests PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
+    target_link_libraries(host_compatibility_tests PRIVATE m)
+endif()
+
+add_test(NAME host_read_only_and_timeout
+         COMMAND host_compatibility_tests authority-timeout)
+add_test(NAME host_configuration_transaction_and_stop
+         COMMAND host_compatibility_tests transaction-stop)
+add_test(NAME host_partial_transaction_is_discardable
+         COMMAND host_compatibility_tests partial-transaction)
+add_test(NAME full_snapshot_roundtrip_and_crc
+         COMMAND host_compatibility_tests snapshot-crc)
+add_test(NAME legacy_migration_and_selective_edit
+         COMMAND host_compatibility_tests legacy-selective)
+add_test(NAME firmware_presets_match_host_table
+         COMMAND host_compatibility_tests preset-table)

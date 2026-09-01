@@ -27,6 +27,7 @@ constexpr uint32_t kControlCommandsPerPass = 4U;
 struct ControlCommand {
     AppControlCommandType type;
     int32_t value;
+    LocalProfileEdit local_edit;
     CanProtocolCommand can_command;
 };
 
@@ -84,7 +85,7 @@ void ApplyControlCommand(const ControlCommand &command)
         MysysLocalMenuEnter();
         break;
     case APP_CONTROL_COMMAND_LOCAL_MENU_EXIT:
-        MysysLocalMenuExit(static_cast<uint32_t>(command.value));
+        MysysLocalMenuExit(&command.local_edit);
         break;
     case APP_CONTROL_COMMAND_LOCAL_TOGGLE_OUTPUT:
         MysysLocalToggleOutput();
@@ -92,7 +93,11 @@ void ApplyControlCommand(const ControlCommand &command)
     case APP_CONTROL_COMMAND_CAN_PROTOCOL: {
         CanProtocolResponse response{};
         const uint32_t runtime_start_cycles = RuntimeMetricsCycleNow();
-        if (FDCAN_ProcessCommand(&command.can_command, &response) && response.valid) {
+        MysysHostCommandBegin(&command.can_command);
+        const bool command_valid =
+            FDCAN_ProcessCommand(&command.can_command, &response) && response.valid;
+        MysysHostCommandEnd(&command.can_command, command_valid);
+        if (command_valid) {
             if (xQueueSendToBack(can_response_queue, &response, 0U) == pdTRUE) {
                 const uint32_t waiting =
                     static_cast<uint32_t>(uxQueueMessagesWaiting(can_response_queue));
@@ -352,7 +357,9 @@ extern "C" bool App_PostControlCommand(AppControlCommandType type, int32_t value
         return false;
     }
 
-    const ControlCommand command{type, value, {}};
+    ControlCommand command{};
+    command.type = type;
+    command.value = value;
     if (xQueueSendToBack(control_command_queue, &command, 0U) != pdTRUE) {
         ++app_control_command_drop_count;
         return false;
@@ -364,6 +371,30 @@ extern "C" bool App_PostControlCommand(AppControlCommandType type, int32_t value
         app_can_control_queue_high_water = waiting;
     }
 
+    xTaskNotifyGive(control_handle);
+    return true;
+}
+
+extern "C" bool App_PostLocalProfileEdit(const LocalProfileEdit *edit)
+{
+    if (edit == nullptr || control_handle == nullptr ||
+        control_command_queue == nullptr) {
+        return false;
+    }
+
+    ControlCommand command{};
+    command.type = APP_CONTROL_COMMAND_LOCAL_MENU_EXIT;
+    command.local_edit = *edit;
+    if (xQueueSendToBack(control_command_queue, &command, 0U) != pdTRUE) {
+        ++app_control_command_drop_count;
+        return false;
+    }
+
+    const uint32_t waiting =
+        static_cast<uint32_t>(uxQueueMessagesWaiting(control_command_queue));
+    if (waiting > app_can_control_queue_high_water) {
+        app_can_control_queue_high_water = waiting;
+    }
     xTaskNotifyGive(control_handle);
     return true;
 }

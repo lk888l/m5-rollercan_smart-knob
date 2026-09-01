@@ -25,6 +25,8 @@
 #include "pid_controller.h"
 #include "smart_knob.h"
 #include "smart_knob_modes.h"
+#include "smart_knob_persistence.h"
+#include "host_control.h"
 #include "local_ui.h"
 #include "local_rgb.h"
 #include "arm_math.h"
@@ -188,19 +190,14 @@ uint32_t lastest_rgb_color = 0;
 #define LOCAL_PROFILE_LIMIT_INDEX 41U
 #define LOCAL_PROFILE_WIDTH_INDEX 42U
 #define LOCAL_PROFILE_CHECKSUM_INDEX 43U
-#define LOCAL_PROFILE_MARKER_INDEX (FLASH_DATA_SIZE - 1U)
+#define LOCAL_PROFILE_MARKER_INDEX 47U
 #define LOCAL_PROFILE_MAGIC 0x4CU
 #define LOCAL_PROFILE_VERSION 1U
 #define LOCAL_PROFILE_MARKER 0xD1U
 #define LOCAL_PROFILE_DEFAULT_FORCE 100U
 #define LOCAL_PROFILE_DEFAULT_LIMIT_10MA 45U
 
-typedef struct {
-  uint8_t mode;
-  uint8_t force_percent;
-  uint8_t current_limit_10ma;
-  uint8_t step_width_deg;
-} MysysLocalProfile;
+typedef LocalProfileEdit MysysLocalProfile;
 
 static volatile uint8_t control_task_active = 0;
 static float control_filter_alpha =
@@ -215,8 +212,18 @@ static uint32_t fast_cycle_start_cycles = 0U;
 static uint32_t fast_cycle_start_active_cycles = 0U;
 static volatile uint32_t local_profile_packed;
 static uint8_t local_menu_restore_output;
+static uint8_t local_menu_control_active;
 static uint8_t local_resume_after_storage;
 static uint8_t local_save_pending;
+static uint8_t local_save_error;
+static uint8_t storage_resume_valid;
+static uint8_t pending_snapshot_valid;
+static HostControlState host_control;
+static volatile uint8_t host_connected_view;
+static SmartKnobPersistentSnapshot persistent_snapshot;
+static SmartKnobPersistentSnapshot pending_snapshot;
+static SmartKnobPersistentSnapshot host_acquisition_snapshot;
+static SmartKnobPersistentSnapshot host_valid_snapshot;
 volatile uint32_t fast_loop_late_start_count;
 volatile uint32_t fast_loop_sync_timeout_count;
 
@@ -243,6 +250,7 @@ static MysysLocalProfile local_profile_unpack(uint32_t packed)
   profile.force_percent = (uint8_t)(packed >> 8);
   profile.current_limit_10ma = (uint8_t)(packed >> 16);
   profile.step_width_deg = (uint8_t)(packed >> 24);
+  profile.dirty_mask = 0U;
   return profile;
 }
 
@@ -278,14 +286,129 @@ static void local_profile_apply(const MysysLocalProfile *profile)
   local_profile_packed = local_profile_pack(profile);
 }
 
+static uint8_t safe_to_enable_motor(void)
+{
+  return !local_save_error && error_code == ERR_NONE && !over_vol_flag &&
+         !err_stalled_flag && !over_value_flag;
+}
+
+static void update_local_profile_projection(void)
+{
+  LocalProfileEdit profile;
+  uint8_t mode = smart_knob_active_mode();
+  if (mode >= smart_knob_modes_count()) {
+    mode = (uint8_t)local_profile_packed;
+  }
+  if (smart_knob_mode_local_projection(mode, &profile, NULL)) {
+    local_profile_packed = local_profile_pack(&profile);
+  }
+}
+
+static int32_t round_positive_to_step(int32_t value, int32_t step)
+{
+  if (value <= 0) {
+    return 0;
+  }
+  return ((value + step / 2) / step) * step;
+}
+
+static bool snapshot_local_projection(
+    const SmartKnobPersistentSnapshot *snapshot,
+    LocalProfileEdit *profile)
+{
+  if (snapshot == NULL || profile == NULL ||
+      snapshot->selected_mode >= SMART_KNOB_MODE_COUNT) {
+    return false;
+  }
+  const SmartKnobModeConfig *defaults =
+      smart_knob_mode_get_default(snapshot->selected_mode);
+  if (defaults == NULL) {
+    return false;
+  }
+
+  int32_t default_scale =
+      (int32_t)(defaults->tuning.current_scale_a * 1000.0f + 0.5f);
+  int32_t force = 100;
+  if (default_scale > 0) {
+    force = (int32_t)(((int64_t)snapshot->mode_values[snapshot->selected_mode][3] *
+                       100 + default_scale / 2) /
+                      default_scale);
+  }
+  force = round_positive_to_step(force, 5);
+  if (force < 25) force = 25;
+  if (force > 125) force = 125;
+
+  int32_t limit_ma = round_positive_to_step(
+      snapshot->mode_values[snapshot->selected_mode][4], 50);
+  if (limit_ma < 100) limit_ma = 100;
+  if (limit_ma > 450) limit_ma = 450;
+  int32_t width_deg = round_positive_to_step(
+      snapshot->mode_values[snapshot->selected_mode][0], 1000) / 1000;
+  if (width_deg < 1) width_deg = 1;
+  if (width_deg > 60) width_deg = 60;
+
+  profile->mode = snapshot->selected_mode;
+  profile->force_percent = (uint8_t)force;
+  profile->current_limit_10ma = (uint8_t)(limit_ma / 10);
+  profile->step_width_deg = (uint8_t)width_deg;
+  profile->dirty_mask = 0U;
+  return true;
+}
+
+static bool stage_snapshot_for_flash(
+    const SmartKnobPersistentSnapshot *snapshot)
+{
+  if (snapshot == NULL ||
+      !smart_knob_persistence_encode(flash_data, FLASH_DATA_SIZE, snapshot)) {
+    return false;
+  }
+
+  LocalProfileEdit profile;
+  if (!snapshot_local_projection(snapshot, &profile)) {
+    return false;
+  }
+  local_profile_stage_for_flash(&profile);
+  pending_snapshot = *snapshot;
+  pending_snapshot_valid = 1U;
+  flash_data[1] = MODE_DIAL;
+  flash_data[29] = COMM_TYPE_CAN;
+  flash_data[32] = 0U;
+  flash_data_write_back_flag = 1U;
+  return true;
+}
+
+static void restore_output_after_storage(uint8_t desired_output)
+{
+  local_resume_after_storage = desired_output != 0U;
+  storage_resume_valid = 1U;
+}
+
+static void restore_motor_output_now(uint8_t desired_output)
+{
+  motor_mode = MODE_DIAL;
+  if (desired_output != 0U && safe_to_enable_motor()) {
+    motor_output = 1U;
+    motor_disable_flag = 0U;
+    init_smart_knob();
+    MotorDriverSetMode(MDRV_MODE_RUN);
+  } else {
+    motor_output = 0U;
+    motor_disable_flag = 1U;
+    MotorDriverSetCurrentRealContinuous(0.0f);
+    MotorDriverSetMode(MDRV_MODE_OFF);
+  }
+}
+
 static void MysysLocalLoadProfile(void)
 {
+  smart_knob_modes_reset_defaults();
   MysysLocalProfile profile = {
       .mode = (uint8_t)SMART_KNOB_DEFAULT_MODE,
       .force_percent = LOCAL_PROFILE_DEFAULT_FORCE,
       .current_limit_10ma = LOCAL_PROFILE_DEFAULT_LIMIT_10MA,
       .step_width_deg = smart_knob_mode_default_width_deg(
           (uint8_t)SMART_KNOB_DEFAULT_MODE),
+      .dirty_mask = 0U,
   };
 
   MysysLocalProfile stored = {
@@ -293,8 +416,10 @@ static void MysysLocalLoadProfile(void)
       .force_percent = flash_data[LOCAL_PROFILE_FORCE_INDEX],
       .current_limit_10ma = flash_data[LOCAL_PROFILE_LIMIT_INDEX],
       .step_width_deg = flash_data[LOCAL_PROFILE_WIDTH_INDEX],
+      .dirty_mask = 0U,
   };
-  if (flash_data[LOCAL_PROFILE_MAGIC_INDEX] == LOCAL_PROFILE_MAGIC &&
+  if (flash_data_length >= SMART_KNOB_FLASH_LEGACY_SIZE &&
+      flash_data[LOCAL_PROFILE_MAGIC_INDEX] == LOCAL_PROFILE_MAGIC &&
       flash_data[LOCAL_PROFILE_VERSION_INDEX] == LOCAL_PROFILE_VERSION &&
       flash_data[LOCAL_PROFILE_MARKER_INDEX] == LOCAL_PROFILE_MARKER &&
       flash_data[LOCAL_PROFILE_CHECKSUM_INDEX] ==
@@ -303,33 +428,45 @@ static void MysysLocalLoadProfile(void)
     profile = stored;
   }
 
-  /* Local-direct mode owns the actuator and leaves the CAN transceiver in
-     standby. The old communication fields remain in the Flash layout so an
-     existing calibrated device can migrate without erasing its offset. */
-  comm_type = COMM_TYPE_NONE;
+  SmartKnobPersistentSnapshot decoded;
+  if (smart_knob_persistence_decode(flash_data, flash_data_length, &decoded)) {
+    (void)smart_knob_snapshot_import(&decoded);
+  } else {
+    /* A legacy 48-byte page is migrated in RAM only. Its four OLED fields are
+       applied over the host-aligned defaults and are not written until an
+       explicit SAVE/Stop/disconnect. */
+    local_profile_apply(&profile);
+  }
+  (void)smart_knob_snapshot_export(&persistent_snapshot);
+  update_local_profile_projection();
+
+  /* CAN-FD+BRS is a fixed product interface. Preserve the stored CAN node ID,
+     but always use the host's 1 Mbit/s nominal and 5 Mbit/s data timing. */
+  comm_type = COMM_TYPE_CAN;
+  bps_index = 0U;
   motor_mode = MODE_DIAL;
   last_motor_mode = MODE_DIAL;
   mode_switch_flag = 0U;
   over_vol_protect_mode = 1U;
   brightness_index = 100U;
   rgb_show_mode = 0U;
-  HAL_GPIO_WritePin(CAN_STB_GPIO_Port, CAN_STB_Pin, GPIO_PIN_SET);
-
-  local_profile_apply(&profile);
-  local_profile_stage_for_flash(&profile);
-  flash_data[1] = MODE_DIAL;
-  flash_data[29] = COMM_TYPE_NONE;
+  host_control_initialize(&host_control);
+  host_connected_view = 0U;
 }
 
 static void MysysLocalStart(void)
 {
-  motor_output = 1U;
   MotorDriverSetCurrentRealContinuous(0.0f);
   init_smart_knob();
   rgb_color = 0x100010U;
-  if (error_code == ERR_NONE && !over_vol_flag && !err_stalled_flag &&
-      !over_value_flag) {
+  if (safe_to_enable_motor()) {
+    motor_output = 1U;
+    motor_disable_flag = 0U;
     MotorDriverSetMode(MDRV_MODE_RUN);
+  } else {
+    motor_output = 0U;
+    motor_disable_flag = 1U;
+    MotorDriverSetMode(MDRV_MODE_OFF);
   }
 }
 
@@ -338,62 +475,241 @@ uint32_t MysysLocalProfilePacked(void)
   return local_profile_packed;
 }
 
+bool MysysLocalProfileGet(LocalProfileEdit *profile,
+                          uint8_t *unrepresentable_mask)
+{
+  if (profile == NULL) {
+    return false;
+  }
+  uint8_t mode = smart_knob_active_mode();
+  if (mode >= smart_knob_modes_count()) {
+    mode = (uint8_t)local_profile_packed;
+  }
+  return smart_knob_mode_local_projection(mode,
+                                          profile,
+                                          unrepresentable_mask);
+}
+
 uint8_t MysysLocalSavePending(void)
 {
   return local_save_pending;
 }
 
+uint8_t MysysLocalSaveError(void)
+{
+  return local_save_error;
+}
+
+uint8_t MysysHostConnected(void)
+{
+  return host_connected_view;
+}
+
+uint8_t MysysHostConfigurationUnrepresentable(void)
+{
+  LocalProfileEdit profile;
+  uint8_t mask = 0U;
+  return MysysLocalProfileGet(&profile, &mask) && mask != 0U;
+}
+
 void MysysLocalMenuEnter(void)
 {
-  if (error_code != ERR_NONE || local_save_pending) {
+  if (host_connected_view || local_save_pending || !safe_to_enable_motor()) {
     return;
   }
   local_menu_restore_output = motor_output;
+  local_menu_control_active = 1U;
   motor_mode = MODE_DIAL;
   motor_output = 1U;
+  motor_disable_flag = 0U;
   MotorDriverSetCurrentRealContinuous(0.0f);
   smart_knob_enter_navigation_mode();
   MotorDriverSetMode(MDRV_MODE_RUN);
 }
 
-void MysysLocalMenuExit(uint32_t packed_profile)
+void MysysLocalMenuExit(const LocalProfileEdit *requested_edit)
 {
-  MysysLocalProfile profile = local_profile_unpack(packed_profile);
-  if (!local_profile_valid(&profile)) {
+  if (host_connected_view || !local_menu_control_active) {
+    return;
+  }
+  MysysLocalProfile profile = requested_edit != NULL
+                                  ? *requested_edit
+                                  : local_profile_unpack(local_profile_packed);
+  if (!local_profile_valid(&profile) ||
+      (profile.dirty_mask & ~(LOCAL_PROFILE_DIRTY_MODE |
+                              LOCAL_PROFILE_DIRTY_FORCE |
+                              LOCAL_PROFILE_DIRTY_WIDTH |
+                              LOCAL_PROFILE_DIRTY_LIMIT)) != 0U) {
     profile = local_profile_unpack(local_profile_packed);
   }
 
   MotorDriverSetCurrentRealContinuous(0.0f);
   MotorDriverSetMode(MDRV_MODE_OFF);
-  local_profile_apply(&profile);
-  local_profile_stage_for_flash(&profile);
+  motor_output = 0U;
+  motor_disable_flag = 1U;
+  local_menu_control_active = 0U;
+  (void)smart_knob_mode_apply_local_edit(&profile);
+  update_local_profile_projection();
+  SmartKnobPersistentSnapshot snapshot;
+  (void)smart_knob_snapshot_export(&snapshot);
   motor_mode = MODE_DIAL;
-  motor_output = local_menu_restore_output;
-  flash_data[1] = MODE_DIAL;
-  flash_data[29] = COMM_TYPE_NONE;
 
-  local_resume_after_storage = local_menu_restore_output;
+  restore_output_after_storage(local_menu_restore_output);
   local_save_pending = 1U;
-  flash_data_write_back_flag = 1U;
+  local_save_error = 0U;
+  if (!stage_snapshot_for_flash(&snapshot)) {
+    local_save_pending = 0U;
+    local_save_error = 1U;
+    storage_resume_valid = 0U;
+  }
   LocalRgbNotifySave();
 }
 
 void MysysLocalToggleOutput(void)
 {
-  if (local_save_pending) {
+  if (host_connected_view || local_save_pending) {
     return;
   }
   if (motor_output) {
     motor_output = 0U;
+    motor_disable_flag = 1U;
     MotorDriverSetCurrentRealContinuous(0.0f);
     MotorDriverSetMode(MDRV_MODE_OFF);
   }
-  else if (error_code == ERR_NONE && !over_vol_flag && !err_stalled_flag &&
-           !over_value_flag) {
+  else if (safe_to_enable_motor()) {
     motor_mode = MODE_DIAL;
     motor_output = 1U;
+    motor_disable_flag = 0U;
     init_smart_knob();
     MotorDriverSetMode(MDRV_MODE_RUN);
+  }
+}
+
+static void schedule_snapshot_save(
+    const SmartKnobPersistentSnapshot *snapshot,
+    uint8_t resume_valid,
+    uint8_t resume_output)
+{
+  MotorDriverSetCurrentRealContinuous(0.0f);
+  MotorDriverSetMode(MDRV_MODE_OFF);
+  motor_output = 0U;
+  motor_disable_flag = 1U;
+  local_save_error = 0U;
+  local_save_pending = 1U;
+  if (resume_valid) {
+    restore_output_after_storage(resume_output);
+  }
+  if (!stage_snapshot_for_flash(snapshot)) {
+    local_save_pending = 0U;
+    local_save_error = 1U;
+    storage_resume_valid = 0U;
+  }
+}
+
+void MysysHostCommandBegin(const CanProtocolCommand *command)
+{
+  uint8_t restore_output = motor_output;
+  const uint8_t menu_runtime_active = local_menu_control_active;
+  if (menu_runtime_active) {
+    restore_output = local_menu_restore_output;
+  } else if (storage_resume_valid) {
+    restore_output = local_resume_after_storage;
+  }
+
+  const uint32_t events = host_control_before_command(
+      &host_control, command, HAL_GetTick(), restore_output);
+  if ((events & HOST_CONTROL_EVENT_CONFIG_BEGIN) != 0U) {
+    const SmartKnobPersistentSnapshot *baseline =
+        host_control.has_committed_config ? &host_valid_snapshot
+                                          : &host_acquisition_snapshot;
+    (void)smart_knob_snapshot_import(baseline);
+    update_local_profile_projection();
+  }
+  if ((events & HOST_CONTROL_EVENT_ACQUIRED) == 0U) {
+    return;
+  }
+  host_connected_view = 1U;
+
+  if (LocalUiIsMenuActive()) {
+    LocalUiCancelForHost();
+  }
+  if (menu_runtime_active) {
+    MotorDriverSetCurrentRealContinuous(0.0f);
+    MotorDriverSetMode(MDRV_MODE_OFF);
+    (void)smart_knob_select_mode((uint8_t)local_profile_packed);
+    local_menu_control_active = 0U;
+    restore_motor_output_now(host_control.restore_output);
+  }
+  (void)smart_knob_snapshot_export(&host_acquisition_snapshot);
+  host_valid_snapshot = host_acquisition_snapshot;
+}
+
+void MysysHostCommandEnd(const CanProtocolCommand *command, bool command_valid)
+{
+  const uint8_t had_valid_config = host_control.has_committed_config;
+  uint32_t events = host_control_after_command(
+      &host_control, command, HAL_GetTick(), command_valid);
+
+  if ((events & HOST_CONTROL_EVENT_CONFIG_COMMITTED) != 0U &&
+      (!motor_output || !safe_to_enable_motor())) {
+    motor_output = 0U;
+    motor_disable_flag = 1U;
+    MotorDriverSetCurrentRealContinuous(0.0f);
+    MotorDriverSetMode(MDRV_MODE_OFF);
+    host_control.has_committed_config = had_valid_config;
+    host_control.stage = HOST_CONTROL_STAGE_DIAL_SELECTED;
+    events &= ~HOST_CONTROL_EVENT_CONFIG_COMMITTED;
+  }
+
+  if ((events & HOST_CONTROL_EVENT_CONFIG_COMMITTED) != 0U) {
+    if (smart_knob_snapshot_export(&host_valid_snapshot)) {
+      update_local_profile_projection();
+    }
+  } else if ((events & HOST_CONTROL_EVENT_SNAPSHOT_CHANGED) != 0U &&
+             host_control.stage == HOST_CONTROL_STAGE_ENABLED &&
+             host_control.has_committed_config) {
+    (void)smart_knob_snapshot_export(&host_valid_snapshot);
+    update_local_profile_projection();
+  }
+
+  if ((events & HOST_CONTROL_EVENT_STOPPED) != 0U &&
+      host_control.has_committed_config) {
+    schedule_snapshot_save(&host_valid_snapshot, 0U, 0U);
+  } else if ((events & HOST_CONTROL_EVENT_SAVE_REQUESTED) != 0U &&
+             host_control.has_committed_config) {
+    schedule_snapshot_save(&host_valid_snapshot, 0U, 0U);
+  }
+}
+
+static void MysysHostServiceTimeout(uint32_t now_ms)
+{
+  if ((host_control_poll(&host_control, now_ms) &
+       HOST_CONTROL_EVENT_TIMED_OUT) == 0U) {
+    return;
+  }
+
+  const uint8_t restore_output = host_control.restore_output;
+  const uint8_t has_valid_config = host_control.has_committed_config;
+  const SmartKnobPersistentSnapshot *restore_snapshot =
+      has_valid_config ? &host_valid_snapshot : &host_acquisition_snapshot;
+
+  MotorDriverSetCurrentRealContinuous(0.0f);
+  MotorDriverSetMode(MDRV_MODE_OFF);
+  motor_output = 0U;
+  (void)smart_knob_snapshot_import(restore_snapshot);
+  update_local_profile_projection();
+  smart_knob_reset_connection_state();
+  host_control_initialize(&host_control);
+  host_connected_view = 0U;
+
+  if (has_valid_config &&
+      memcmp(restore_snapshot, &persistent_snapshot,
+             sizeof(*restore_snapshot)) != 0) {
+    schedule_snapshot_save(restore_snapshot, 1U, restore_output);
+  } else if (flash_data_write_back_flag || local_save_pending) {
+    restore_output_after_storage(restore_output);
+  } else {
+    restore_motor_output_now(restore_output);
   }
 }
 
@@ -851,8 +1167,8 @@ void InitMysys(void)
   HAL_NVIC_ClearPendingIRQ(TIM1_UP_TIM16_IRQn);
   __HAL_TIM_ENABLE_IT(&htim1, TIM_IT_UPDATE);
   HAL_Delay(300); 
-  /* Preserve the existing calibration/PID page, then migrate its unused tail
-     to the local UI profile without performing an unsolicited boot-time erase. */
+  /* Preserve the existing calibration/PID prefix, then migrate an old local
+     profile in RAM without performing an unsolicited boot-time erase. */
   comm_type = COMM_TYPE_NONE;
   init_flash_data();
   /* init_flash_data() applies the persisted electrical offset after the fast
@@ -864,6 +1180,13 @@ void InitMysys(void)
   MysysLocalLoadProfile();
   u8g2Init(&u8g2);
   init_pid();
+  u8g2_disp_init();
+  LocalUiInitialize();
+  MysysLocalStart();
+
+  /* Open the external control interface only after the local runtime is fully
+     initialized. A command received in the pre-scheduler fallback can then no
+     longer be overwritten by a later local-start action. */
   if (comm_type == COMM_TYPE_I2C) {
     user_i2c_init();
     i2c1_it_enable();
@@ -871,16 +1194,14 @@ void InitMysys(void)
   else if (comm_type == COMM_TYPE_CAN) {
     // hard_uart_begin();
     user_fdcan_init();
+    HAL_GPIO_WritePin(CAN_STB_GPIO_Port, CAN_STB_Pin, GPIO_PIN_RESET);
   }
   else if (comm_type == COMM_TYPE_CAN_I2C) {
     user_i2c_init();
     I2C1_Start();
     user_fdcan_init();
+    HAL_GPIO_WritePin(CAN_STB_GPIO_Port, CAN_STB_Pin, GPIO_PIN_RESET);
   }
-
-  u8g2_disp_init();
-  LocalUiInitialize();
-  MysysLocalStart();
 }
 
 
@@ -893,8 +1214,8 @@ void LoopMysys(void)
 
 void LoopMysysOnce(void)
 {
-        /* Communication recovery is retained for legacy builds, but is never
-           entered by the local-direct profile. */
+        /* Keep the legacy I2C recovery path available; normal product runtime
+           uses the CAN-only branch selected during profile loading. */
         if (comm_type != COMM_TYPE_NONE) {
           i2c_timeout_counter = 0;
           if (i2c_stop_timeout_flag && i2c_stop_timeout_delay < HAL_GetTick()) {
@@ -932,18 +1253,45 @@ void MysysStorageOnce(void)
 {
   /* Flash operations may stall instruction fetch.  Defer them until the
      current-control output is no longer running. */
-  if (flash_data_write_back_flag && sys_status != SYS_RUNNING) {
-    (void)flash_data_write_back();
-    flash_data_write_back_flag = 0;
-
-    if (local_save_pending) {
+  if (flash_data_write_back_flag && motor_output == 0U &&
+      sys_status != SYS_RUNNING && !MotorDriverIsOutputEnabled()) {
+    if (!pending_snapshot_valid &&
+        !stage_snapshot_for_flash(&persistent_snapshot)) {
+      flash_data_write_back_flag = 0U;
       local_save_pending = 0U;
-      if (local_resume_after_storage && error_code == ERR_NONE &&
-          !over_vol_flag && !err_stalled_flag && !over_value_flag) {
-        init_smart_knob();
-        MotorDriverSetMode(MDRV_MODE_RUN);
+      local_save_error = 1U;
+      storage_resume_valid = 0U;
+      return;
+    }
+
+    const bool success = flash_data_write_back();
+    flash_data_write_back_flag = 0U;
+    local_save_pending = 0U;
+    if (success) {
+      if (pending_snapshot_valid) {
+        persistent_snapshot = pending_snapshot;
       }
+      pending_snapshot_valid = 0U;
+      local_save_error = 0U;
+      if (storage_resume_valid) {
+        const uint8_t desired_output = local_resume_after_storage;
+        storage_resume_valid = 0U;
+        local_resume_after_storage = 0U;
+        if (!host_connected_view) {
+          restore_motor_output_now(desired_output);
+        }
+      }
+    } else {
+      /* Keep the staged snapshot in RAM so an explicit later SAVE/Stop can
+         retry the same data instead of silently falling back to the older
+         persistent image. */
+      local_save_error = 1U;
+      storage_resume_valid = 0U;
       local_resume_after_storage = 0U;
+      motor_output = 0U;
+      motor_disable_flag = 1U;
+      MotorDriverSetCurrentRealContinuous(0.0f);
+      MotorDriverSetMode(MDRV_MODE_OFF);
     }
   }
 
@@ -1100,7 +1448,7 @@ void Rpm_Count_100us(void)
 
 void MysysCycleMode(void)
 {
-  if (!mode_switch_flag) {
+  if (host_connected_view || !mode_switch_flag) {
     return;
   }
 
@@ -1220,6 +1568,7 @@ void MysysControlTaskBegin(void)
 
 void MysysControlStep(void)
 {
+  MysysHostServiceTimeout(HAL_GetTick());
   Loop_Control();
   MysysRunModeController();
 }

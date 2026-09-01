@@ -771,6 +771,17 @@ bool smart_knob_telemetry_enabled(void)
     return telemetry_enable != 0U;
 }
 
+void smart_knob_reset_connection_state(void)
+{
+    telemetry_enable = SMART_KNOB_TELEMETRY_DEFAULT_ENABLED;
+    telemetry_rate_hz = SMART_KNOB_TELEMETRY_DEFAULT_RATE_HZ;
+    telemetry_host_id = 0U;
+    telemetry_last_ms = 0U;
+    telemetry_started = false;
+    telemetry_sequence = 0U;
+    telemetry_pending_type = 0U;
+}
+
 bool smart_knob_build_telemetry(uint32_t now_ms, SmartKnobTelemetryFrame *frame)
 {
     if (frame == NULL || telemetry_enable == 0U) {

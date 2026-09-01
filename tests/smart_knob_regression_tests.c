@@ -142,7 +142,7 @@ static void test_coarse_strong_current_is_continuous_near_quarter_detent(void)
     /* Move slowly through the reported 0.23-detent region. With a continuous
        control law, adjacent 0.001-width samples differ by only a few mA. A
        hard output deadband instead exposes a roughly 0 -> 90 mA edge. */
-    for (uint32_t sample = 180U; sample <= 300U; ++sample) {
+    for (uint32_t sample = 80U; sample <= 300U; ++sample) {
         const float fraction = (float)sample / 1000.0f;
         advance_and_handle(width * fraction, 0.0f, 1000U);
 
@@ -183,8 +183,8 @@ static void test_coarse_strong_current_is_continuous_near_quarter_detent(void)
               20.0f);
     }
     require_true(test_name,
-                 fabsf(quarter_detent_current_ma) > 80.0f &&
-                     fabsf(quarter_detent_current_ma) < 130.0f,
+                 fabsf(quarter_detent_current_ma) > 130.0f &&
+                     fabsf(quarter_detent_current_ma) < 170.0f,
                  "quarter-detent restoring current must be continuous and non-zero");
 }
 
@@ -298,8 +298,8 @@ static void test_local_profile_applies_and_resets_preset_tuning(void)
     }
     require_true(test_name,
                  smart_knob_mode_default_width_deg(
-                     SMART_KNOB_MODE_COARSE_STRONG) == 8U,
-                 "coarse preset default width must round to eight degrees");
+                     SMART_KNOB_MODE_COARSE_STRONG) == 10U,
+                 "coarse preset default width must match the host table");
 }
 
 static void test_navigation_mode_is_private_and_reversible(void)

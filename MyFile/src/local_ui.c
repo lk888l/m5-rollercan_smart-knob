@@ -31,13 +31,6 @@ typedef enum {
     LOCAL_UI_EDIT_LIMIT,
 } LocalUiScreen;
 
-typedef struct {
-    uint8_t mode;
-    uint8_t force_percent;
-    uint8_t current_limit_10ma;
-    uint8_t step_width_deg;
-} LocalUiProfile;
-
 static const char *const root_items[LOCAL_UI_ROOT_ITEM_COUNT] = {
     "MODE", "FORCE", "STEP", "LIMIT", "SAVE"
 };
@@ -52,9 +45,10 @@ static const char *const dashboard_mode_names[SMART_KNOB_MODE_COUNT] = {
     "FINE", "FDET", "C+", "C-", "MAG", "CDET"
 };
 
-static LocalUiScreen screen = LOCAL_UI_DASHBOARD;
-static LocalUiProfile profile;
-static LocalUiProfile edit_backup;
+static volatile LocalUiScreen screen = LOCAL_UI_DASHBOARD;
+static LocalProfileEdit profile;
+static LocalProfileEdit edit_backup;
+static uint8_t edit_unrepresentable_mask;
 static int8_t root_cursor;
 static int32_t last_navigation_position;
 static uint8_t navigation_position_valid;
@@ -79,24 +73,6 @@ static int32_t wrap_i32(int32_t value, int32_t count)
     while (value >= count) {
         value -= count;
     }
-    return value;
-}
-
-static uint32_t pack_profile(const LocalUiProfile *value)
-{
-    return (uint32_t)value->mode |
-           ((uint32_t)value->force_percent << 8) |
-           ((uint32_t)value->current_limit_10ma << 16) |
-           ((uint32_t)value->step_width_deg << 24);
-}
-
-static LocalUiProfile unpack_profile(uint32_t packed)
-{
-    LocalUiProfile value;
-    value.mode = (uint8_t)packed;
-    value.force_percent = (uint8_t)(packed >> 8);
-    value.current_limit_10ma = (uint8_t)(packed >> 16);
-    value.step_width_deg = (uint8_t)(packed >> 24);
     return value;
 }
 
@@ -180,12 +156,29 @@ static void draw_dashboard(const SmartKnobRuntimeState *state)
         u8g2_SetDrawColor(&u8g2, 0);
         u8g2_SetFont(&u8g2, u8g2_font_5x8_tr);
         draw_centered(fault, 26U);
+    } else if (MysysLocalSaveError()) {
+        u8g2_SetDrawColor(&u8g2, 1);
+        u8g2_DrawBox(&u8g2, 7U, 16U, 50U, 14U);
+        u8g2_SetDrawColor(&u8g2, 0);
+        u8g2_SetFont(&u8g2, u8g2_font_5x8_tr);
+        draw_centered("SAVE ERR", 26U);
     } else if (!motor_output) {
         u8g2_SetDrawColor(&u8g2, 1);
         u8g2_DrawBox(&u8g2, 11U, 16U, 42U, 14U);
         u8g2_SetDrawColor(&u8g2, 0);
         u8g2_SetFont(&u8g2, u8g2_font_5x8_tr);
         draw_centered("PAUSED", 26U);
+    }
+
+    if (MysysHostConnected()) {
+        const char *connected = MysysHostConfigurationUnrepresentable()
+                                    ? "HOST CONNECTED*"
+                                    : "HOST CONNECTED";
+        u8g2_SetDrawColor(&u8g2, 0);
+        u8g2_DrawBox(&u8g2, 0U, 40U, 64U, 8U);
+        u8g2_SetDrawColor(&u8g2, 1);
+        u8g2_SetFont(&u8g2, u8g2_font_4x6_tr);
+        draw_centered(connected, 47U);
     }
     u8g2_SetDrawColor(&u8g2, 1);
     u8g2_SendBuffer(&u8g2);
@@ -266,16 +259,34 @@ static void draw_current_screen(const SmartKnobRuntimeState *state)
         draw_mode_editor();
         break;
     case LOCAL_UI_EDIT_FORCE:
-        snprintf(value, sizeof(value), "%u%%", profile.force_percent);
+        if ((edit_unrepresentable_mask &
+             SMART_KNOB_LOCAL_UNREPRESENTABLE_FORCE) != 0U &&
+            (profile.dirty_mask & LOCAL_PROFILE_DIRTY_FORCE) == 0U) {
+            snprintf(value, sizeof(value), "*");
+        } else {
+            snprintf(value, sizeof(value), "%u%%", profile.force_percent);
+        }
         draw_numeric_editor("FORCE", value);
         break;
     case LOCAL_UI_EDIT_WIDTH:
-        snprintf(value, sizeof(value), "%u deg", profile.step_width_deg);
+        if ((edit_unrepresentable_mask &
+             SMART_KNOB_LOCAL_UNREPRESENTABLE_WIDTH) != 0U &&
+            (profile.dirty_mask & LOCAL_PROFILE_DIRTY_WIDTH) == 0U) {
+            snprintf(value, sizeof(value), "*");
+        } else {
+            snprintf(value, sizeof(value), "%u deg", profile.step_width_deg);
+        }
         draw_numeric_editor("STEP", value);
         break;
     case LOCAL_UI_EDIT_LIMIT:
-        snprintf(value, sizeof(value), "%u mA",
-                 (unsigned int)profile.current_limit_10ma * 10U);
+        if ((edit_unrepresentable_mask &
+             SMART_KNOB_LOCAL_UNREPRESENTABLE_LIMIT) != 0U &&
+            (profile.dirty_mask & LOCAL_PROFILE_DIRTY_LIMIT) == 0U) {
+            snprintf(value, sizeof(value), "*");
+        } else {
+            snprintf(value, sizeof(value), "%u mA",
+                     (unsigned int)profile.current_limit_10ma * 10U);
+        }
         draw_numeric_editor("LIMIT", value);
         break;
     default:
@@ -293,21 +304,28 @@ static void apply_navigation_delta(int32_t delta)
                                        LOCAL_UI_ROOT_ITEM_COUNT);
         break;
     case LOCAL_UI_EDIT_MODE:
-        profile.mode = (uint8_t)wrap_i32((int32_t)profile.mode + delta,
-                                         SMART_KNOB_MODE_COUNT);
-        profile.step_width_deg = smart_knob_mode_default_width_deg(profile.mode);
+        {
+            const uint8_t dirty = profile.dirty_mask | LOCAL_PROFILE_DIRTY_MODE;
+            profile.mode = (uint8_t)wrap_i32((int32_t)profile.mode + delta,
+                                             SMART_KNOB_MODE_COUNT);
+            (void)smart_knob_mode_local_projection(
+                profile.mode, &profile, &edit_unrepresentable_mask);
+            profile.dirty_mask = dirty;
+        }
         break;
     case LOCAL_UI_EDIT_FORCE:
         profile.force_percent = (uint8_t)clamp_i32(
             (int32_t)profile.force_percent + delta * LOCAL_UI_FORCE_STEP,
             LOCAL_UI_FORCE_MIN,
             LOCAL_UI_FORCE_MAX);
+        profile.dirty_mask |= LOCAL_PROFILE_DIRTY_FORCE;
         break;
     case LOCAL_UI_EDIT_WIDTH:
         profile.step_width_deg = (uint8_t)clamp_i32(
             (int32_t)profile.step_width_deg + delta,
             LOCAL_UI_WIDTH_MIN_DEG,
             LOCAL_UI_WIDTH_MAX_DEG);
+        profile.dirty_mask |= LOCAL_PROFILE_DIRTY_WIDTH;
         break;
     case LOCAL_UI_EDIT_LIMIT:
         profile.current_limit_10ma = (uint8_t)clamp_i32(
@@ -315,6 +333,7 @@ static void apply_navigation_delta(int32_t delta)
                 delta * LOCAL_UI_LIMIT_STEP_UNITS,
             LOCAL_UI_LIMIT_MIN_UNITS,
             LOCAL_UI_LIMIT_MAX_UNITS);
+        profile.dirty_mask |= LOCAL_PROFILE_DIRTY_LIMIT;
         break;
     default:
         break;
@@ -344,8 +363,7 @@ static void update_navigation_position(const SmartKnobRuntimeState *state)
 
 static void request_save_and_exit(void)
 {
-    if (App_PostControlCommand(APP_CONTROL_COMMAND_LOCAL_MENU_EXIT,
-                               (int32_t)pack_profile(&profile))) {
+    if (App_PostLocalProfileEdit(&profile)) {
         screen = LOCAL_UI_DASHBOARD;
         navigation_position_valid = 0U;
         next_frame_ms = 0U;
@@ -355,9 +373,11 @@ static void request_save_and_exit(void)
 static void handle_long_press(void)
 {
     if (screen == LOCAL_UI_DASHBOARD) {
-        if (error_code == ERR_NONE &&
+        if (!MysysHostConnected() && !MysysLocalSavePending() &&
+            !MysysLocalSaveError() && error_code == ERR_NONE &&
             App_PostControlCommand(APP_CONTROL_COMMAND_LOCAL_MENU_ENTER, 0)) {
-            profile = unpack_profile(MysysLocalProfilePacked());
+            (void)MysysLocalProfileGet(&profile, &edit_unrepresentable_mask);
+            profile.dirty_mask = 0U;
             root_cursor = 0;
             screen = LOCAL_UI_ROOT_MENU;
             navigation_position_valid = 0U;
@@ -386,6 +406,9 @@ static void handle_double_click(void)
     }
 
     edit_backup = profile;
+    LocalProfileEdit projected;
+    (void)smart_knob_mode_local_projection(
+        profile.mode, &projected, &edit_unrepresentable_mask);
     switch (root_cursor) {
     case 0: screen = LOCAL_UI_EDIT_MODE; break;
     case 1: screen = LOCAL_UI_EDIT_FORCE; break;
@@ -399,7 +422,7 @@ static void handle_double_click(void)
 
 void LocalUiInitialize(void)
 {
-    profile = unpack_profile(MysysLocalProfilePacked());
+    (void)MysysLocalProfileGet(&profile, &edit_unrepresentable_mask);
     screen = LOCAL_UI_DASHBOARD;
     navigation_position_valid = 0U;
     next_frame_ms = 0U;
@@ -411,6 +434,19 @@ void LocalUiTask(void)
     (void)smart_knob_get_runtime_state(&state);
 
     button_update();
+
+    if (MysysHostConnected()) {
+        screen = LOCAL_UI_DASHBOARD;
+        navigation_position_valid = 0U;
+        button_cancel_events();
+        const uint32_t host_now_ms = HAL_GetTick();
+        if (next_frame_ms == 0U ||
+            (int32_t)(host_now_ms - next_frame_ms) >= 0) {
+            draw_dashboard(&state);
+            next_frame_ms = host_now_ms + LOCAL_UI_FRAME_PERIOD_MS;
+        }
+        return;
+    }
     update_navigation_position(&state);
 
     const uint8_t long_press = my_button.was_longpress;
@@ -432,6 +468,14 @@ void LocalUiTask(void)
         draw_current_screen(&state);
         next_frame_ms = now_ms + LOCAL_UI_FRAME_PERIOD_MS;
     }
+}
+
+void LocalUiCancelForHost(void)
+{
+    screen = LOCAL_UI_DASHBOARD;
+    navigation_position_valid = 0U;
+    next_frame_ms = 0U;
+    button_cancel_events();
 }
 
 uint8_t LocalUiIsMenuActive(void)

@@ -9,6 +9,7 @@ extern "C" {
 
 void LocalUiInitialize(void);
 void LocalUiTask(void);
+void LocalUiCancelForHost(void);
 uint8_t LocalUiIsMenuActive(void);
 uint8_t LocalUiIsEditing(void);
 

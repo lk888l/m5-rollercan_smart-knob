@@ -105,6 +105,6 @@ FDCAN callback 只通知 CommunicationTask；帧读取、回复发送和 CAN-I2C
 - 电机不转：先看 `sys_status`、`error_code`、`motor_output`、`motor_mode`，再看 `GPIOB PB2` 驱动使能。
 - 电流异常：先确认 `MyADCZeroCal()` 时电机无电流，再检查 ADC DMA buffer 和相电流方向。
 - 角度异常：先看 SPI1/TLE5012B 原始角度，再看 `angle_cal_offset` 和 `angle_corrected`。
-- CAN 收不到：确认 `can_id` filter、`bps_index`、扩展帧和 Classic CAN。
+- CAN 收不到：确认 `can_id` filter、固定 1/5 Mbit/s 时序、扩展 ID、CAN-FD 与 BRS。
 - I2C 读写异常：确认 7-bit 地址是否左移、从机中断是否启用、STOP 是否被触发。
-- UI 卡住菜单：菜单本身是阻塞循环，会临时进入 Dial 模式，退出后才回主 UI。
+- UI 卡住菜单：检查 LocalUi 非阻塞状态、私有导航模式和 `MysysHostConnected()`；上位机接管时菜单应立即取消并回仪表盘。

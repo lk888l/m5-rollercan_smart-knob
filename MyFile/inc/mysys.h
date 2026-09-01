@@ -6,6 +6,8 @@
 #ifndef __MYSYS_H__
 #define __MYSYS_H__
 #include <stdbool.h>
+#include "can_protocol.h"
+#include "local_profile.h"
 #include "stm32g4xx.h"
 #include "pid_controller.h"
 
@@ -105,10 +107,17 @@ void MysysControlTaskBegin(void);
 void MysysControlStep(void);
 void MysysCycleMode(void);
 void MysysLocalMenuEnter(void);
-void MysysLocalMenuExit(uint32_t packed_profile);
+void MysysLocalMenuExit(const LocalProfileEdit *edit);
 void MysysLocalToggleOutput(void);
 uint32_t MysysLocalProfilePacked(void);
+bool MysysLocalProfileGet(LocalProfileEdit *profile,
+                          uint8_t *unrepresentable_mask);
 uint8_t MysysLocalSavePending(void);
+uint8_t MysysLocalSaveError(void);
+uint8_t MysysHostConnected(void);
+uint8_t MysysHostConfigurationUnrepresentable(void);
+void MysysHostCommandBegin(const CanProtocolCommand *command);
+void MysysHostCommandEnd(const CanProtocolCommand *command, bool command_valid);
 void MysysFastLoopISR(void);
 void MysysFastLoopOnEncoderSampleFromISR(uint8_t fresh_sample,
                                          uint32_t irq_start_cycles);

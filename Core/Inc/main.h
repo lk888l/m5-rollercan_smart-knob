@@ -49,7 +49,7 @@ extern "C" {
 
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
-#define FLASH_DATA_SIZE 48
+#define FLASH_DATA_SIZE 512
 
 #define MY_INT32_MAX 2100000000
 #define MY_INT32_MIN -2100000000
@@ -63,6 +63,7 @@ extern uint8_t last_act_flag;
 extern float32_t angle_target;
 extern uint8_t i2c_address[1];
 extern uint8_t flash_data[FLASH_DATA_SIZE];
+extern uint16_t flash_data_length;
 extern uint8_t motor_disable_flag;
 /* USER CODE END EC */
 

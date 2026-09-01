@@ -65,6 +65,7 @@ uint8_t buffer[100] = {0};
 uint8_t act_flag = 0;
 uint8_t last_act_flag = 0;
 uint8_t flash_data[FLASH_DATA_SIZE] = {0};
+uint16_t flash_data_length = 0U;
 uint8_t i2c_address[1] = {I2C_ADDRESS};
 volatile uint8_t fm_version = FIRMWARE_VERSION;
 uint16_t pos_readback;
@@ -117,7 +118,10 @@ uint32_t micros(void)
 
 void init_flash_data(void) 
 {   
-  if (!(readPackedMessageFromFlash(flash_data, FLASH_DATA_SIZE))) {
+  flash_data_length = readPackedMessageFromFlash(flash_data, FLASH_DATA_SIZE);
+  if (flash_data_length < 37U) {
+    memset(flash_data, 0, sizeof(flash_data));
+    flash_data_length = 0U;
     i2c_address[0] = I2C_ADDRESS;
     flash_data[0] = i2c_address[0];
     flash_data[1] = motor_mode;
@@ -162,7 +166,6 @@ void init_flash_data(void)
     flash_data[34] = rgb_show_mode;
     flash_data[35] = motor_stall_protection_flag;
     flash_data[36] = motor_overvalue_protection_flag;
-    writeMessageToFlash(flash_data , FLASH_DATA_SIZE);
   } else {
     i2c_address[0] = flash_data[0];
     motor_mode = flash_data[1];
@@ -210,15 +213,15 @@ void init_flash_data(void)
 
 bool flash_data_write_back(void)
 {
-  if (motor_mode == MODE_SPEED_ERR_PROTECT) {
-    motor_mode = MODE_SPEED;
+  if (motor_output != 0U || sys_status == SYS_RUNNING ||
+      MotorDriverIsOutputEnabled()) {
+    return false;
   }
-  else if (motor_mode == MODE_POS_ERR_PROTECT) {
-    motor_mode = MODE_POS;
-  }
-    
+
   flash_data[0] = i2c_address[0];
-  flash_data[1] = motor_mode;
+  /* The product runtime is always the local SmartKnob/Dial application. Keep
+     the legacy projection safe without mutating a live protection state. */
+  flash_data[1] = MODE_DIAL;
   flash_data[2] = angle_cal_offset;
   flash_data[3] = (angle_cal_offset >> 8);
   flash_data[4] = can_id;
@@ -260,7 +263,11 @@ bool flash_data_write_back(void)
   flash_data[34] = rgb_show_mode;
   flash_data[35] = motor_stall_protection_flag;
   flash_data[36] = motor_overvalue_protection_flag;
-  return writeMessageToFlash(flash_data, FLASH_DATA_SIZE);
+  const bool success = writeMessageToFlash(flash_data, FLASH_DATA_SIZE);
+  if (success) {
+    flash_data_length = FLASH_DATA_SIZE;
+  }
+  return success;
 }
 
 void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
@@ -898,7 +905,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  /* Local-direct firmware keeps the external CAN transceiver silent. */
+  /* Keep the transceiver quiet until the stored CAN ID has been loaded. */
   HAL_GPIO_WritePin(CAN_STB_GPIO_Port, CAN_STB_Pin, GPIO_PIN_SET);
   MX_DMA_Init();
   MX_ADC1_Init();

@@ -124,18 +124,11 @@ FDCAN1 在业务初始化中使用 `user_fdcan_init()`：
 - filter 按 `can_id` 和 mask `0xFF` 过滤。
 - RX FIFO0 new message interrupt。
 
-波特率通过 `bps_index` 选择：
+运行时固定 `bps_index=0` 和 `NominalPrescaler=1`。旧波特率写命令仍返回兼容响应，但不会改变硬件时序。
 
-| `bps_index` | `NominalPrescaler` | UI 文案 |
-| --- | --- | --- |
-| 0 | 1 | 1 Mbps |
-| 1 | 2 | 500 Kbps |
-| 2 | 8 | 125 Kbps |
-
-FDCAN 使用 80 MHz PLLQ 时钟。`bps_index=0` 时仲裁段为 `1 + 63 + 16` TQ，
+FDCAN 使用 80 MHz PLLQ 时钟。仲裁段为 `1 + 63 + 16` TQ，
 对应 1 Mbps、80% 采样点、SJW 5；数据段为 `1 + 11 + 4` TQ，对应
-5 Mbps、75% 采样点、DSJW 3。其他 `bps_index` 只改变仲裁段预分频，
-数据段保持 5 Mbps。
+5 Mbps、75% 采样点、DSJW 3。
 
 ## TIM3 + DMA
 
