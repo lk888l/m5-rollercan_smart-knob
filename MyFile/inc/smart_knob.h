@@ -51,6 +51,8 @@ typedef struct {
     uint16_t max_current_permille;
     float friction_current_a;
     float click_current_a;
+    /* Frictionless mode: speed-dependent feed-forward, A / (rad/s). */
+    float viscous_friction_a_per_rad_s;
 } SmartKnobTuning;
 
 typedef struct {
@@ -92,6 +94,7 @@ enum {
     SMART_KNOB_FUNC_MAX_CURRENT_PERMILLE = 0x8105,
     SMART_KNOB_FUNC_FRICTION_CURRENT = 0x8106,
     SMART_KNOB_FUNC_CLICK_CURRENT = 0x8107,
+    SMART_KNOB_FUNC_VISCOUS_FRICTION = 0x8108, /* microamps / (rad/s) */
 
     SMART_KNOB_FUNC_CUSTOM_POSITION = 0x8201,
     SMART_KNOB_FUNC_CUSTOM_MIN_POSITION = 0x8202,
@@ -117,6 +120,10 @@ enum {
 /* Compatibility entry points used by the existing mode controller. */
 void init_smart_knob(void);
 void handle_smart_knob(void);
+#ifdef ROLLERCAN_MOTOR_DIAGNOSTICS
+void smart_knob_observe_motion(void);
+void smart_knob_set_test_cogging_scale(float scale);
+#endif
 void smart_knob_set_update_rate(float update_rate_hz);
 
 bool smart_knob_select_mode(uint8_t mode_index);

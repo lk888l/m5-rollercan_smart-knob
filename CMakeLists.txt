@@ -39,6 +39,12 @@ enable_language(C CXX ASM)
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
 
+option(ROLLERCAN_MOTOR_DIAGNOSTICS "Enable bounded ControlTask SWD motor experiments" OFF)
+if(ROLLERCAN_MOTOR_DIAGNOSTICS)
+    target_sources(${CMAKE_PROJECT_NAME} PRIVATE App/src/motor_diagnostics.cpp)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE ROLLERCAN_MOTOR_DIAGNOSTICS=1)
+endif()
+
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
 

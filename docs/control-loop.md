@@ -49,6 +49,7 @@ FOC 实现在 `MyFile/src/motordriver.c`。
 - `MotorDriverSetCurrentReal(phase_current)` 的单位是 mA，内部乘以 1.25 得到 ADC/PI 目标。
 - 普通电流、速度和位置模式保留 60 mA 静音区；SmartKnob 通过连续电流入口绕过该幅值死区，避免弹簧控制在阈值两侧反复通断。
 - 目标严格等于零时，FOC ISR 同时清零 Id/Iq PI 状态和 `ud/uq`，避免电流环继续追踪零点采样偏置；遥测中的实测电流仍可能显示 ADC 的小幅零点噪声。
+- 无摩擦模式转动时通过 `MotorDriverSetTorqueCurrent()` 发布同一快照中的零电流跟踪标志，即使 Iq 目标为 0 也继续运行 PI 以抵消反电动势。否则运行中的零电压 PWM 会产生电磁制动。静止、故障及其他模式继续使用上述静音策略。
 - 实际限幅为 `[-1200, 1200]` mA。
 
 ## 编码器校准
@@ -80,6 +81,8 @@ FOC 实现在 `MyFile/src/motordriver.c`。
   - `motor_rps = diff / 16383 * (2 * PI * 1000)`
 
 速度、电流、电压和温度低通的系数已按 1 ms 采样周期重新计算。速度/位置 PID 仍保存原协议中的离散增益，但运行系数按原约 5.09 kHz 到 1 kHz 的周期比例转换：Ki 约乘 5.09，Kd 约除 5.09。
+
+无摩擦模式另用 `motor_rps_fast`：从完整编码器计数计算速度，以 8 ms 时间常数滤波。它不改变原有 2 Hz 速度估计和 PID 手感；编码器校准重同步时同时清零。
 
 ## 速度模式
 
@@ -159,7 +162,7 @@ Dial 模式由 `MyFile/src/smart_knob.c` 和 `MyFile/src/smart_knob_modes.c` 共
 - 触感输出使用 `(P * position_error - D * velocity) * current_scale`，再叠加摩擦补偿和可选双相 click 电流。
 - 电流同时受模式限幅、0–1000 ‰ 安全比例和底层 1.2 A 硬限制约束，最后调用 SmartKnob 专用的 `MotorDriverSetCurrentRealContinuous()`；其他控制模式仍调用带 60 mA 静音区的 `MotorDriverSetCurrentReal()`。
 - 只有无边界模式会在低速静止后慢慢修正 detent 中心；有边界模式保持固定中心网格。编码器跳变或进入模式后的稳定期输出 0，跳变保护连续取得两个合理样本后会重新同步，不会停留在永久无效状态。
-- 单中心回弹模式从 20 rad/s 开始削弱加速电流、45 rad/s 时完全取消加速电流；全局高速保护在 60 rad/s 进入、40 rad/s 退出。
+- 单中心回弹模式从 20 rad/s 开始削弱加速电流、45 rad/s 时完全取消加速电流；原有模式的高速保护在 60 rad/s 进入、40 rad/s 退出。无摩擦模式 12 不使用速度衰减或高速锁定，编码器位置增量根据快速度估计校验，不再套用原有 80 rad/s 采样门槛；电流限幅、故障和异常样本处理仍生效。
 - `smart_knob_modes.h` 的 `SMART_KNOB_DEFAULT_MODE` 是唯一的默认预设选择点；各预设配置互相独立。
 - CAN 参数切换模式或修改手感仍在 ControlTask 执行；CommunicationTask 只读取一致快照并主动发送遥测。
 

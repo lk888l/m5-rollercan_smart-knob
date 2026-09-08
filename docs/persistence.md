@@ -23,7 +23,7 @@ Flash 读写在 `Core/Src/flash.c`：
 
 如果 Flash 中有合法 package：
 
-1. 记录实际 package 长度并读取到 512 字节 `flash_data` 缓冲。
+1. 记录实际 package 长度并读取到 592 字节 `flash_data` 缓冲。
 2. 反序列化 I2C 地址、模式、编码器 offset、CAN ID、PID、通信模式、波特率、亮度、RGB、保护开关。
 3. 应用编码器 offset。
 4. 将整数 PID 转为浮点 PID。
@@ -31,7 +31,7 @@ Flash 读写在 `Core/Src/flash.c`：
 
 ## Flash 数据布局
 
-`FLASH_DATA_SIZE = 512`，数据包总占用为 8 字节 package header + 512 字节 data，远小于 page 59 的 2048 字节容量。前 48 字节保持旧布局，37-43 和 47 继续保存可供旧固件读取的基础 SmartKnob 投影。
+`FLASH_DATA_SIZE = 592`，数据包总占用为 8 字节 package header + 592 字节 data，远小于 page 59 的 2048 字节容量。前 48 字节保持旧布局，37-43 和 47 继续保存基础 SmartKnob 投影。旧固件不认识新增的模式 12，降级后会按其自身默认模式回退。
 
 | Byte | 内容 | 说明 |
 | --- | --- | --- |
@@ -55,9 +55,9 @@ Flash 读写在 `Core/Src/flash.c`：
 | 36 | motor_overvalue_protection_flag | 位置越界保护开关 |
 | 37 | local magic | 固定 `0x4C` |
 | 38 | local profile version | 当前为 `1` |
-| 39 | SmartKnob mode | 0-11 用户预设索引 |
+| 39 | SmartKnob mode | 0-12 用户预设索引 |
 | 40 | force percent | 25-125 |
-| 41 | current limit / 10 mA | 10-45，即 100-450 mA |
+| 41 | current limit / 10 mA | FR-L：10-80，即 100-800 mA；其他模式：10-45 |
 | 42 | step width degrees | 1-60° |
 | 43 | local checksum | `0xA5` 与 byte 39-42 的 XOR |
 | 44-46 | 保留 | 当前写为 0/保持原值 |
@@ -70,20 +70,22 @@ Flash 读写在 `Core/Src/flash.c`：
 | Byte | 内容 |
 | --- | --- |
 | 48-51 | little-endian magic `SKN2` |
-| 52 | 扩展版本，当前为 1 |
-| 53 | 模式数，固定 12 |
+| 52 | 扩展版本，当前为 2 |
+| 53 | 模式数，固定 13 |
 | 54 | 当前模式 |
 | 55 | flags，当前为 0 |
-| 56-57 | payload 长度，固定 440 |
+| 56-57 | payload 长度，固定 524 |
 | 58-59 | 保留 |
 | 60-63 | CRC32 |
-| 64-447 | 12 个模式记录，每个 32 字节 |
-| 448-503 | Custom 的 14 个 function 值 |
-| 504-511 | 保留并写 0 |
+| 64-531 | 13 个模式记录，每个 36 字节 |
+| 532-587 | Custom 的 14 个 function 值 |
+| 588-591 | 保留并写 0 |
 
-每个模式记录依次保存挡位宽度（毫度）以及 `P`、`D`、`current_scale`、`current_limit`、`max_current_permille`、`friction`、`click` 七项 tuning。Custom 区按 `0x8201..0x820E` 的协议单位保存 position/min/max、宽度、detent/endstop、snap/bias、click/friction、scale、P/D 和 LED hue。除协议本来就是整数的 position、hue 和 permille 外，数值沿用 CAN function 的 `int32 × 1000` 表示，不直接保存带编译器填充的 C 结构体。
+每个模式记录依次保存挡位宽度（毫度）以及 `P`、`D`、`current_scale`、`current_limit`、`max_current_permille`、`friction`、`click`、`viscous_friction` 八项 tuning。最后一项使用 µA/(rad/s) 整数；其余字段保持原 CAN 单位。Custom 区按 `0x8201..0x820E` 保存 14 项参数。不直接保存带编译器填充的 C 结构体。
 
-CRC32 覆盖扩展 header（不含 CRC 字段）和 440 字节 payload。magic、版本、长度、模式数、当前模式或 CRC 任一无效时，固件丢弃扩展区并回退到前 48 字节；不会使用半损坏的高级参数。
+CRC32 覆盖扩展 header（不含 CRC 字段）和 payload。magic、版本、长度、模式数、当前模式或 CRC 任一无效时，固件丢弃扩展区并回退到前 48 字节；不会使用半损坏的高级参数。
+
+仍接受 v1 的 512 字节包：12 个 32 字节模式记录、440 字节 payload 及其原 CRC。解码时保留全部旧 tuning 和 Custom 值，补入新模式的默认值，旧模式的新增黏性系数设为 0。升级只在 RAM 中迁移，下次显式保存时写为 v2；解码过程不改变正在运行的模式。
 
 ## 写回触发
 
@@ -105,6 +107,6 @@ CRC32 覆盖扩展 header（不含 CRC 字段）和 440 字节 payload。magic�
 ## 写入注意事项
 
 - Flash 写入会擦除整个 page 59。
-- `writeMessageToFlash()` 拒绝零长度、非 8 字节对齐或连同 8 字节 package header 超出 page 59 的数据；当前 512 字节布局满足约束。
+- `writeMessageToFlash()` 拒绝零长度、非 8 字节对齐或连同 8 字节 package header 超出 page 59 的数据；当前 592 字节布局满足约束。
 - page 59 起始地址为 `0x0801D800`，应用链接区截止于 `0x0801D7FF`；构建后应继续检查 map，避免代码侵入配置页。
 - byte 1 始终写成 `MODE_DIAL`，保证新固件重启和旧固件降级时都不会落在运行保护态。

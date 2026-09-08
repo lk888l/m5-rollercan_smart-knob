@@ -13,7 +13,8 @@ typedef struct {
   float iq_target_adc;
   uint32_t mode_generation;
   uint8_t driver_mode;
-  uint8_t reserved[3];
+  uint8_t track_zero_current;
+  uint8_t reserved[2];
 } FastControlCommandSnapshot;
 
 typedef struct {
@@ -32,6 +33,7 @@ extern volatile uint32_t fast_sensor_read_failure_count;
 
 void FastControlLinkInit(void);
 void FastControlPublishCurrentAdc(float iq_target_adc);
+void FastControlPublishTorqueCurrentAdc(float iq_target_adc);
 void FastControlPublishDriverMode(uint8_t driver_mode);
 bool FastControlConsumeCommandFromISR(FastControlCommandSnapshot *command);
 

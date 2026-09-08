@@ -21,11 +21,13 @@ typedef enum {
     SMART_KNOB_MODE_COARSE_WEAK,
     SMART_KNOB_MODE_MAGNETIC,
     SMART_KNOB_MODE_RETURN_TO_CENTER_DETENTS,
+    SMART_KNOB_MODE_FRICTIONLESS, /* Append: existing CAN preset IDs stay stable. */
     SMART_KNOB_MODE_COUNT
 } SmartKnobMode;
 
 enum {
-    SMART_KNOB_SNAPSHOT_MODE_VALUE_COUNT = 8,
+    SMART_KNOB_FRICTIONLESS_CURRENT_LIMIT_MA = 800,
+    SMART_KNOB_SNAPSHOT_MODE_VALUE_COUNT = 9,
     SMART_KNOB_SNAPSHOT_CUSTOM_VALUE_COUNT = 14,
 };
 
@@ -57,12 +59,17 @@ uint8_t smart_knob_modes_count(void);
 const SmartKnobModeConfig *smart_knob_mode_get(uint8_t mode_index);
 const SmartKnobModeConfig *smart_knob_mode_get_default(uint8_t mode_index);
 SmartKnobModeConfig *smart_knob_mode_get_mutable(uint8_t mode_index);
+/* Canonical FR-L P/D/current-limit values for control, CAN and persistence.
+   Other modes retain their existing tuning representation. */
+void smart_knob_mode_normalize_tuning(uint8_t mode_index, SmartKnobTuning *tuning);
+uint16_t smart_knob_mode_local_current_limit_max_ma(uint8_t mode_index);
 bool smart_knob_mode_apply_local_profile(uint8_t mode_index,
                                          uint8_t force_percent,
                                          uint16_t current_limit_ma,
                                          uint8_t step_width_deg);
 bool smart_knob_mode_apply_local_edit(const LocalProfileEdit *edit);
 bool smart_knob_snapshot_export(SmartKnobPersistentSnapshot *snapshot);
+bool smart_knob_snapshot_defaults(SmartKnobPersistentSnapshot *snapshot);
 bool smart_knob_snapshot_import(const SmartKnobPersistentSnapshot *snapshot);
 bool smart_knob_mode_local_projection(uint8_t mode_index,
                                       LocalProfileEdit *profile,

@@ -91,10 +91,41 @@ static const SmartKnobModeConfig default_modes[SMART_KNOB_MODE_COUNT] = {
     [SMART_KNOB_MODE_RETURN_TO_CENTER_DETENTS] =
         MODE_CONFIG("Center detents", 0, -6, 6, 60.0f, 1.0f, 1.0f, 0.55f, 0.4f,
                     157, 10.0f, 0.1f, 0.2f, 0.0f, 0.0f),
+    [SMART_KNOB_MODE_FRICTIONLESS] = {
+        .config = {
+            .position = 0, .min_position = 0, .max_position = -1,
+            .position_width_radians = DEG_TO_RAD(10.0f),
+            .snap_point = 0.75f, .text = "Frictionless", .led_hue = 128,
+        },
+        .tuning = {
+            .p_gain = 8.0f, /* Additional nominal rotor inertias in FR-L. */
+            .d_gain = 0.010f, /* Acceleration filter time in seconds. */
+            .current_scale_a = 0.987f, /* Dimensionless compensation scale here. */
+            .current_limit_a = SMART_KNOB_FRICTIONLESS_CURRENT_LIMIT_MA / 1000.0f,
+            .max_current_permille = 700U,
+            .friction_current_a = 0.022f,
+            .viscous_friction_a_per_rad_s = 0.000304f,
+        },
+    },
 };
 
 static SmartKnobModeConfig modes[SMART_KNOB_MODE_COUNT];
 static bool initialized;
+
+void smart_knob_mode_normalize_tuning(uint8_t mode_index, SmartKnobTuning *tuning)
+{
+    if (mode_index != SMART_KNOB_MODE_FRICTIONLESS || tuning == NULL) {
+        return;
+    }
+    tuning->p_gain = isfinite(tuning->p_gain)
+        ? fmaxf(0.0f, fminf(tuning->p_gain, 8.0f)) : 0.0f;
+    /* Zero is a persisted request for the default 20 ms filter. */
+    tuning->d_gain = isfinite(tuning->d_gain) && tuning->d_gain > 0.0f
+        ? fmaxf(0.005f, fminf(tuning->d_gain, 0.2f)) : 0.0f;
+    tuning->current_limit_a = isfinite(tuning->current_limit_a)
+        ? fmaxf(0.0f, fminf(tuning->current_limit_a,
+                SMART_KNOB_FRICTIONLESS_CURRENT_LIMIT_MA / 1000.0f)) : 0.0f;
+}
 
 static int32_t scaled_to_i32(float value)
 {
@@ -136,20 +167,25 @@ static int32_t round_to_step(int32_t value, int32_t step)
 }
 
 static void export_mode_values(
+    uint8_t mode_index,
     const SmartKnobModeConfig *mode,
     int32_t values[SMART_KNOB_SNAPSHOT_MODE_VALUE_COUNT])
 {
+    SmartKnobTuning tuning = mode->tuning;
+    smart_knob_mode_normalize_tuning(mode_index, &tuning);
     values[0] = width_millidegrees(mode);
-    values[1] = scaled_to_i32(mode->tuning.p_gain);
-    values[2] = scaled_to_i32(mode->tuning.d_gain);
+    values[1] = scaled_to_i32(tuning.p_gain);
+    values[2] = scaled_to_i32(tuning.d_gain);
     values[3] = scaled_to_i32(mode->tuning.current_scale_a);
-    values[4] = scaled_to_i32(mode->tuning.current_limit_a);
+    values[4] = scaled_to_i32(tuning.current_limit_a);
     values[5] = mode->tuning.max_current_permille;
     values[6] = scaled_to_i32(mode->tuning.friction_current_a);
     values[7] = scaled_to_i32(mode->tuning.click_current_a);
+    values[8] = scaled_to_i32(mode->tuning.viscous_friction_a_per_rad_s * 1000.0f);
 }
 
 static void import_mode_values(
+    uint8_t mode_index,
     SmartKnobModeConfig *mode,
     const int32_t values[SMART_KNOB_SNAPSHOT_MODE_VALUE_COUNT])
 {
@@ -167,6 +203,9 @@ static void import_mode_values(
         (float)(values[6] < 0 ? 0 : values[6]) / 1000.0f;
     mode->tuning.click_current_a =
         (float)(values[7] < 0 ? 0 : values[7]) / 1000.0f;
+    mode->tuning.viscous_friction_a_per_rad_s =
+        (float)clamp_i32(values[8], 0, 10000) / 1000000.0f;
+    smart_knob_mode_normalize_tuning(mode_index, &mode->tuning);
 }
 
 void smart_knob_modes_initialize(void)
@@ -211,6 +250,12 @@ SmartKnobModeConfig *smart_knob_mode_get_mutable(uint8_t mode_index)
     return (SmartKnobModeConfig *)smart_knob_mode_get(mode_index);
 }
 
+uint16_t smart_knob_mode_local_current_limit_max_ma(uint8_t mode_index)
+{
+    return mode_index == SMART_KNOB_MODE_FRICTIONLESS
+        ? SMART_KNOB_FRICTIONLESS_CURRENT_LIMIT_MA : 450U;
+}
+
 bool smart_knob_mode_apply_local_profile(uint8_t mode_index,
                                          uint8_t force_percent,
                                          uint16_t current_limit_ma,
@@ -228,8 +273,8 @@ bool smart_knob_mode_apply_local_profile(uint8_t mode_index,
     }
     if (current_limit_ma < 100U) {
         current_limit_ma = 100U;
-    } else if (current_limit_ma > 450U) {
-        current_limit_ma = 450U;
+    } else if (current_limit_ma > smart_knob_mode_local_current_limit_max_ma(mode_index)) {
+        current_limit_ma = smart_knob_mode_local_current_limit_max_ma(mode_index);
     }
     if (step_width_deg < 1U) {
         step_width_deg = 1U;
@@ -264,7 +309,8 @@ bool smart_knob_mode_apply_local_edit(const LocalProfileEdit *edit)
     }
     if ((edit->dirty_mask & LOCAL_PROFILE_DIRTY_LIMIT) != 0U) {
         const uint16_t current_ma = (uint16_t)clamp_i32(
-            (int32_t)edit->current_limit_10ma * 10, 100, 450);
+            (int32_t)edit->current_limit_10ma * 10, 100,
+            smart_knob_mode_local_current_limit_max_ma(edit->mode));
         mode->tuning.current_limit_a = (float)current_ma / 1000.0f;
     }
     if ((edit->dirty_mask & LOCAL_PROFILE_DIRTY_WIDTH) != 0U) {
@@ -275,23 +321,25 @@ bool smart_knob_mode_apply_local_edit(const LocalProfileEdit *edit)
     return smart_knob_select_mode(edit->mode);
 }
 
-bool smart_knob_snapshot_export(SmartKnobPersistentSnapshot *snapshot)
+static bool snapshot_export_modes(SmartKnobPersistentSnapshot *snapshot,
+                                  const SmartKnobModeConfig *source,
+                                  uint8_t selected_mode)
 {
     if (snapshot == NULL) {
         return false;
     }
     smart_knob_modes_initialize();
     memset(snapshot, 0, sizeof(*snapshot));
-    const uint8_t active = smart_knob_active_mode();
+    const uint8_t active = selected_mode;
     snapshot->selected_mode = active < SMART_KNOB_MODE_COUNT
                                   ? active
                                   : (uint8_t)SMART_KNOB_DEFAULT_MODE;
 
     for (uint8_t index = 0U; index < SMART_KNOB_MODE_COUNT; ++index) {
-        export_mode_values(&modes[index], snapshot->mode_values[index]);
+        export_mode_values(index, &source[index], snapshot->mode_values[index]);
     }
 
-    const SmartKnobModeConfig *custom = &modes[SMART_KNOB_MODE_CUSTOM];
+    const SmartKnobModeConfig *custom = &source[SMART_KNOB_MODE_CUSTOM];
     snapshot->custom_values[0] = custom->config.position;
     snapshot->custom_values[1] = custom->config.min_position;
     snapshot->custom_values[2] = custom->config.max_position;
@@ -311,6 +359,17 @@ bool smart_knob_snapshot_export(SmartKnobPersistentSnapshot *snapshot)
     snapshot->custom_values[12] = scaled_to_i32(custom->tuning.d_gain);
     snapshot->custom_values[13] = custom->config.led_hue;
     return true;
+}
+
+bool smart_knob_snapshot_export(SmartKnobPersistentSnapshot *snapshot)
+{
+    smart_knob_modes_initialize();
+    return snapshot_export_modes(snapshot, modes, smart_knob_active_mode());
+}
+
+bool smart_knob_snapshot_defaults(SmartKnobPersistentSnapshot *snapshot)
+{
+    return snapshot_export_modes(snapshot, default_modes, SMART_KNOB_DEFAULT_MODE);
 }
 
 bool smart_knob_snapshot_import(const SmartKnobPersistentSnapshot *snapshot)
@@ -354,7 +413,7 @@ bool smart_knob_snapshot_import(const SmartKnobPersistentSnapshot *snapshot)
     custom->config.led_hue = clamp_i32(snapshot->custom_values[13], 0, 255);
 
     for (uint8_t index = 0U; index < SMART_KNOB_MODE_COUNT; ++index) {
-        import_mode_values(&modes[index], snapshot->mode_values[index]);
+        import_mode_values(index, &modes[index], snapshot->mode_values[index]);
     }
     return smart_knob_select_mode(snapshot->selected_mode);
 }
@@ -394,7 +453,8 @@ bool smart_knob_mode_local_projection(uint8_t mode_index,
 
     const int32_t actual_limit_ma = scaled_to_i32(mode->tuning.current_limit_a);
     const int32_t limit_ma =
-        clamp_i32(round_to_step(actual_limit_ma, 50), 100, 450);
+        clamp_i32(round_to_step(actual_limit_ma, 50), 100,
+                  smart_knob_mode_local_current_limit_max_ma(mode_index));
     if (limit_ma != actual_limit_ma) {
         mask |= SMART_KNOB_LOCAL_UNREPRESENTABLE_LIMIT;
     }
@@ -408,13 +468,14 @@ bool smart_knob_mode_local_projection(uint8_t mode_index,
 
     int32_t current_values[SMART_KNOB_SNAPSHOT_MODE_VALUE_COUNT];
     int32_t default_values[SMART_KNOB_SNAPSHOT_MODE_VALUE_COUNT];
-    export_mode_values(mode, current_values);
-    export_mode_values(defaults, default_values);
+    export_mode_values(mode_index, mode, current_values);
+    export_mode_values(mode_index, defaults, default_values);
     if (current_values[1] != default_values[1] ||
         current_values[2] != default_values[2] ||
         current_values[5] != default_values[5] ||
         current_values[6] != default_values[6] ||
-        current_values[7] != default_values[7]) {
+        current_values[7] != default_values[7] ||
+        current_values[8] != default_values[8]) {
         mask |= SMART_KNOB_LOCAL_UNREPRESENTABLE_ADVANCED;
     }
 

@@ -3,7 +3,10 @@
 #include <string.h>
 
 #define SNAPSHOT_MAGIC 0x324E4B53UL /* "SKN2" in little endian. */
-#define SNAPSHOT_VERSION 1U
+#define SNAPSHOT_VERSION 2U
+#define SNAPSHOT_V1_MODE_COUNT 12U
+#define SNAPSHOT_V1_VALUE_COUNT 8U
+#define SNAPSHOT_V1_TOTAL_SIZE 512U
 #define SNAPSHOT_HEADER_SIZE 16U
 #define SNAPSHOT_PAYLOAD_OFFSET \
     (SMART_KNOB_FLASH_EXTENSION_OFFSET + SNAPSHOT_HEADER_SIZE)
@@ -19,7 +22,7 @@
 
 _Static_assert(SNAPSHOT_PAYLOAD_OFFSET + SNAPSHOT_PAYLOAD_SIZE <=
                    SMART_KNOB_FLASH_TOTAL_SIZE,
-               "SmartKnob snapshot exceeds the reserved 512-byte area");
+               "SmartKnob snapshot exceeds the reserved payload area");
 _Static_assert((SMART_KNOB_FLASH_TOTAL_SIZE % 8U) == 0U,
                "Flash payload must remain double-word aligned");
 _Static_assert(SMART_KNOB_FLASH_TOTAL_SIZE + 8U <= 2048U,
@@ -82,7 +85,7 @@ uint32_t smart_knob_persistence_crc32(const uint8_t *data, size_t length)
     return crc32_update(UINT32_MAX, data, length) ^ UINT32_MAX;
 }
 
-static uint32_t snapshot_crc(const uint8_t *flash_bytes)
+static uint32_t snapshot_crc(const uint8_t *flash_bytes, size_t payload_size)
 {
     uint32_t crc = UINT32_MAX;
     crc = crc32_update(crc,
@@ -90,7 +93,7 @@ static uint32_t snapshot_crc(const uint8_t *flash_bytes)
                        12U);
     crc = crc32_update(crc,
                        &flash_bytes[SNAPSHOT_PAYLOAD_OFFSET],
-                       SNAPSHOT_PAYLOAD_SIZE);
+                       payload_size);
     return crc ^ UINT32_MAX;
 }
 
@@ -134,7 +137,8 @@ bool smart_knob_persistence_encode(
         offset += sizeof(int32_t);
     }
 
-    put_u32_le(&flash_bytes[SNAPSHOT_CRC_OFFSET], snapshot_crc(flash_bytes));
+    put_u32_le(&flash_bytes[SNAPSHOT_CRC_OFFSET],
+               snapshot_crc(flash_bytes, SNAPSHOT_PAYLOAD_SIZE));
     return true;
 }
 
@@ -144,29 +148,40 @@ bool smart_knob_persistence_decode(
     SmartKnobPersistentSnapshot *snapshot)
 {
     if (flash_bytes == NULL || snapshot == NULL ||
-        stored_length < SMART_KNOB_FLASH_TOTAL_SIZE ||
+        stored_length < SNAPSHOT_PAYLOAD_OFFSET ||
         get_u32_le(&flash_bytes[SMART_KNOB_FLASH_EXTENSION_OFFSET]) !=
-            SNAPSHOT_MAGIC ||
-        flash_bytes[SMART_KNOB_FLASH_EXTENSION_OFFSET + 4U] !=
-            SNAPSHOT_VERSION ||
+            SNAPSHOT_MAGIC) {
+        return false;
+    }
+    const uint8_t version = flash_bytes[SMART_KNOB_FLASH_EXTENSION_OFFSET + 4U];
+    if (version != 1U && version != SNAPSHOT_VERSION) {
+        return false;
+    }
+    const uint8_t mode_count = version == 1U ? SNAPSHOT_V1_MODE_COUNT : SMART_KNOB_MODE_COUNT;
+    const uint8_t value_count = version == 1U ? SNAPSHOT_V1_VALUE_COUNT : SMART_KNOB_SNAPSHOT_MODE_VALUE_COUNT;
+    const size_t payload_size = (size_t)mode_count * value_count * sizeof(int32_t) + SNAPSHOT_CUSTOM_PAYLOAD_SIZE;
+    const size_t total_size = version == 1U ? SNAPSHOT_V1_TOTAL_SIZE : SMART_KNOB_FLASH_TOTAL_SIZE;
+    if (stored_length < total_size ||
         flash_bytes[SMART_KNOB_FLASH_EXTENSION_OFFSET + 5U] !=
-            SMART_KNOB_MODE_COUNT ||
+            mode_count ||
         flash_bytes[SMART_KNOB_FLASH_EXTENSION_OFFSET + 6U] >=
-            SMART_KNOB_MODE_COUNT ||
+            mode_count ||
         get_u16_le(&flash_bytes[SMART_KNOB_FLASH_EXTENSION_OFFSET + 8U]) !=
-            SNAPSHOT_PAYLOAD_SIZE ||
+            payload_size ||
         get_u32_le(&flash_bytes[SNAPSHOT_CRC_OFFSET]) !=
-            snapshot_crc(flash_bytes)) {
+            snapshot_crc(flash_bytes, payload_size)) {
         return false;
     }
 
-    memset(snapshot, 0, sizeof(*snapshot));
+    /* Add the new preset/fields from defaults without changing live modes.
+       v1's twelve tuned presets and custom settings retain their exact values. */
+    (void)smart_knob_snapshot_defaults(snapshot);
     snapshot->selected_mode =
         flash_bytes[SMART_KNOB_FLASH_EXTENSION_OFFSET + 6U];
     size_t offset = SNAPSHOT_PAYLOAD_OFFSET;
-    for (uint8_t mode = 0U; mode < SMART_KNOB_MODE_COUNT; ++mode) {
+    for (uint8_t mode = 0U; mode < mode_count; ++mode) {
         for (uint8_t value = 0U;
-             value < SMART_KNOB_SNAPSHOT_MODE_VALUE_COUNT;
+             value < value_count;
              ++value) {
             snapshot->mode_values[mode][value] = get_i32_le(&flash_bytes[offset]);
             offset += sizeof(int32_t);

@@ -24,8 +24,14 @@
 #include <string.h>
 #include "pid_controller.h"
 #include "smart_knob.h"
+#if defined(ROLLERCAN_MOTOR_DIAGNOSTICS)
+#include "motor_diagnostics.h"
+#endif
 #include "smart_knob_modes.h"
 #include "smart_knob_persistence.h"
+
+_Static_assert(FLASH_DATA_SIZE == SMART_KNOB_FLASH_TOTAL_SIZE,
+               "Flash buffer must match the SmartKnob persistence format");
 #include "host_control.h"
 #include "local_ui.h"
 #include "local_rgb.h"
@@ -58,7 +64,8 @@ float32_t mechanical_rad;
 int32_t diff_encoder_value = 0;
 float32_t diff_encoder_value_lpf = 0.0f;
 float32_t motor_rpm; 
-float32_t motor_rps; 
+float32_t motor_rps;
+float motor_rps_fast;
 float32_t angle_target,angle_error; 
 
 float32_t angle_kp,angle_ki,angle_kd;
@@ -259,7 +266,8 @@ static uint8_t local_profile_valid(const MysysLocalProfile *profile)
   return profile->mode < smart_knob_modes_count() &&
          profile->force_percent >= 25U && profile->force_percent <= 125U &&
          profile->current_limit_10ma >= 10U &&
-         profile->current_limit_10ma <= 45U &&
+         profile->current_limit_10ma <=
+             smart_knob_mode_local_current_limit_max_ma(profile->mode) / 10U &&
          profile->step_width_deg >= 1U && profile->step_width_deg <= 60U;
 }
 
@@ -341,7 +349,9 @@ static bool snapshot_local_projection(
   int32_t limit_ma = round_positive_to_step(
       snapshot->mode_values[snapshot->selected_mode][4], 50);
   if (limit_ma < 100) limit_ma = 100;
-  if (limit_ma > 450) limit_ma = 450;
+  const int32_t max_limit_ma =
+      smart_knob_mode_local_current_limit_max_ma(snapshot->selected_mode);
+  if (limit_ma > max_limit_ma) limit_ma = max_limit_ma;
   int32_t width_deg = round_positive_to_step(
       snapshot->mode_values[snapshot->selected_mode][0], 1000) / 1000;
   if (width_deg < 1) width_deg = 1;
@@ -777,6 +787,7 @@ static void rebase_encoder_after_calibration(void)
   rpm_rps_count_temp = 0.0f;
   motor_rpm = 0.0f;
   motor_rps = 0.0f;
+  motor_rps_fast = 0.0f;
 
   if (primask == 0U) {
     __enable_irq();
@@ -1145,7 +1156,10 @@ void InitMysys(void)
 	HAL_TIM_PWM_Start(&htim1,TIM_CHANNEL_3);  
 
 	HAL_Delay(20);
-	MyADCZeroCal();
+	if (MyADCZeroCal() == 0U) {
+	    /* PB2 is still low: do not start FOC or enable an uncalibrated bridge. */
+	    Error_Handler();
+	}
 
   /* TIM1 is already running steadily for PWM/ADC. Keep it running and align
      UIE to a natural repetition update. Stopping a center-aligned timer and
@@ -1352,6 +1366,12 @@ void Loop_Control(void)
     rpm_rps_count_temp = diff_encoder_value_lpf / 16383.0f;
     motor_rpm = rpm_rps_count_temp * encoder_counts_to_rpm;
     motor_rps = rpm_rps_count_temp * encoder_counts_to_rps;
+    /* Low-latency full-resolution velocity for friction compensation. The
+       existing 2 Hz estimate remains unchanged for legacy PID modes. */
+    const float fast_alpha = 1.0f / (1.0f + 0.008f *
+        (encoder_counts_to_rps / (2.0f * PI)));
+    motor_rps_fast += fast_alpha *
+        ((float)diff_encoder_value * encoder_counts_to_rps / 16384.0f - motor_rps_fast);
     speed_encoder_value_t.last_encoder_value = speed_encoder_value_t.encoder_value;  
 
     //get input voltage
@@ -1570,6 +1590,11 @@ void MysysControlStep(void)
 {
   MysysHostServiceTimeout(HAL_GetTick());
   Loop_Control();
+#if defined(ROLLERCAN_MOTOR_DIAGNOSTICS)
+  if (MotorDiagnosticsStep()) {
+    return;
+  }
+#endif
   MysysRunModeController();
 }
 

@@ -57,16 +57,16 @@
 - 根菜单长按：保存全部设置并退出。
 - 选中 `SAVE` 后双击：保存全部设置并退出。
 
-进入菜单时，ControlTask 将 SmartKnob 切到私有模式 `0xFF`。该模式是 12°、双向无边界的导航挡位，不计入 12 个用户预设，也不会修改用户预设的运行位置。退出菜单后恢复用户选择的预设。
+进入菜单时，ControlTask 将 SmartKnob 切到私有模式 `0xFF`。该模式是 12°、双向无边界的导航挡位，不计入 13 个用户预设，也不会修改用户预设的运行位置。退出菜单后恢复用户选择的预设。
 
 ## 菜单项
 
 | 项目 | 范围 | 步进 | 含义 |
 | --- | ---: | ---: | --- |
-| `MODE` | 12 个内置预设 | 1 个预设 | Custom、Free、Bound、Multi、On/Off、Center、Fine、Fine Detents、Coarse+/−、Magnetic、Center Detents |
+| `MODE` | 13 个内置预设 | 1 个预设 | Custom、Free、Bound、Multi、On/Off、Center、Fine、Fine Detents、Coarse+/−、Magnetic、Center Detents、FR-LESS |
 | `FORCE` | 25～125% | 5% | 相对预设默认 `current_scale_a` 的力度比例 |
 | `STEP` | 1～60° | 1° | 每个挡位的机械角宽度；切换模式时载入该模式当前保存值 |
-| `LIMIT` | 100～450 mA | 50 mA | SmartKnob 相电流软件上限，仍受底层硬限制约束 |
+| `LIMIT` | FR-L：100～800 mA；其他模式：100～450 mA | 50 mA | SmartKnob 相电流软件上限，仍受底层硬限制约束 |
 | `SAVE` | - | - | 写入 Flash 并退出 |
 
 参数编辑期间继续使用独立导航挡位；新触感配置在退出菜单后一次性应用。退出命令携带模式、三项数值和 dirty mask，因此本地 SAVE 只覆盖实际转动修改过的字段，不会重建或清空 P/D、摩擦、click 等隐藏 tuning。

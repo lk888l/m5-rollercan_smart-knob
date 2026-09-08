@@ -17,7 +17,6 @@
 #define LOCAL_UI_FORCE_MAX 125
 #define LOCAL_UI_FORCE_STEP 5
 #define LOCAL_UI_LIMIT_MIN_UNITS 10
-#define LOCAL_UI_LIMIT_MAX_UNITS 45
 #define LOCAL_UI_LIMIT_STEP_UNITS 5
 #define LOCAL_UI_WIDTH_MIN_DEG 1
 #define LOCAL_UI_WIDTH_MAX_DEG 60
@@ -37,12 +36,12 @@ static const char *const root_items[LOCAL_UI_ROOT_ITEM_COUNT] = {
 
 static const char *const mode_names[SMART_KNOB_MODE_COUNT] = {
     "CUSTOM", "FREE", "BOUND", "MULTI", "ON/OFF", "CENTER",
-    "FINE", "F-DET", "COARSE+", "COARSE-", "MAGNET", "C-DET"
+    "FINE", "F-DET", "COARSE+", "COARSE-", "MAGNET", "C-DET", "FR-LESS"
 };
 
 static const char *const dashboard_mode_names[SMART_KNOB_MODE_COUNT] = {
     "CUS", "FREE", "BND", "MULT", "ON", "CTR",
-    "FINE", "FDET", "C+", "C-", "MAG", "CDET"
+    "FINE", "FDET", "C+", "C-", "MAG", "CDET", "FR-L"
 };
 
 static volatile LocalUiScreen screen = LOCAL_UI_DASHBOARD;
@@ -332,7 +331,7 @@ static void apply_navigation_delta(int32_t delta)
             (int32_t)profile.current_limit_10ma +
                 delta * LOCAL_UI_LIMIT_STEP_UNITS,
             LOCAL_UI_LIMIT_MIN_UNITS,
-            LOCAL_UI_LIMIT_MAX_UNITS);
+            smart_knob_mode_local_current_limit_max_ma(profile.mode) / 10U);
         profile.dirty_mask |= LOCAL_PROFILE_DIRTY_LIMIT;
         break;
     default:

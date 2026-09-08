@@ -136,8 +136,8 @@
 
 ## `MyFile/src/smart_knob_modes.c`
 
-- 保存与上位机 `rollercan.rs` 冻结表一致的 12 个默认预设。
-- 导入/导出 12×（宽度+7 tuning）和 Custom 14 项的完整 RAM 快照。
+- 保存与上位机 `rollercan.rs` 冻结表一致的 12 个原有预设，并追加无摩擦模式 12。
+- 导入/导出 13×（宽度+8 tuning）和 Custom 14 项的完整 RAM 快照。
 - 将活动模式投影为 OLED 的 MODE/FORCE/STEP/LIMIT，并报告不可表达字段 mask。
 - `smart_knob_mode_apply_local_edit()` 只覆盖 dirty 字段，保留隐藏高级参数。
 
@@ -149,7 +149,7 @@
 
 ## `MyFile/src/smart_knob_persistence.c`
 
-- 显式 little-endian 编解码 512 字节 Flash data 区，不保存原始 C 结构体。
+- 显式 little-endian 编解码 592 字节 Flash data 区，兼容读取旧 512 字节 v1 包，不保存原始 C 结构体。
 - 校验 magic、版本、模式数、payload 长度、当前模式和 CRC32。
 - 编码时从 byte 48 开始写，保证前 48 字节降级兼容投影不被破坏。
 
@@ -214,7 +214,7 @@
 
 职责：
 
-- 片内 Flash page 59 的 EEPROM 包格式，512 字节 data 区包含兼容前缀和版本化 CRC32 快照。
+- 片内 Flash page 59 的 EEPROM 包格式，592 字节 data 区包含兼容前缀和版本化 CRC32 快照。
 - 读、写、检查 package head 和 length。
 
 运行：

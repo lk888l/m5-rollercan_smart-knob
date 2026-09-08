@@ -14,11 +14,14 @@ uint8_t error_code;
 uint8_t over_vol_flag;
 float mechanical_rad;
 float motor_rps;
+float motor_rps_fast;
 float ph_crrent_lpf;
 
 static uint32_t fake_time_us;
 static float commanded_current_ma;
 static uint8_t output_enabled = 1U;
+static bool zero_current_tracking;
+static uint32_t actuator_write_count;
 
 uint32_t HAL_GetTick(void)
 {
@@ -32,6 +35,7 @@ uint32_t micros(void)
 
 void MotorDriverSetCurrentReal(float phase_current_ma)
 {
+    ++actuator_write_count;
     commanded_current_ma = fabsf(phase_current_ma) <= 60.0f
                                ? 0.0f
                                : phase_current_ma;
@@ -39,7 +43,16 @@ void MotorDriverSetCurrentReal(float phase_current_ma)
 
 void MotorDriverSetCurrentRealContinuous(float phase_current_ma)
 {
+    ++actuator_write_count;
     commanded_current_ma = phase_current_ma;
+    zero_current_tracking = false;
+}
+
+void MotorDriverSetTorqueCurrent(float phase_current_ma)
+{
+    ++actuator_write_count;
+    commanded_current_ma = phase_current_ma;
+    zero_current_tracking = true;
 }
 
 uint8_t MotorDriverIsOutputEnabled(void)
@@ -75,6 +88,7 @@ static void advance_and_handle(float position_rad,
 {
     mechanical_rad = position_rad;
     motor_rps = velocity_rad_s;
+    motor_rps_fast = velocity_rad_s;
     fake_time_us += elapsed_us;
     handle_smart_knob();
 }
@@ -95,6 +109,7 @@ static void reset_controller(uint8_t mode_index)
     commanded_current_ma = NAN;
     mechanical_rad = 0.0f;
     motor_rps = 0.0f;
+    motor_rps_fast = 0.0f;
     ph_crrent_lpf = 0.0f;
     error_code = 0U;
     over_vol_flag = 0U;
@@ -328,6 +343,678 @@ static void test_navigation_mode_is_private_and_reversible(void)
                  "restored preset must replace navigation mode");
 }
 
+static void move_for(float velocity, uint32_t milliseconds)
+{
+    for (uint32_t i = 0; i < milliseconds; ++i) {
+        advance_and_handle(mechanical_rad + velocity * 0.001f, velocity, 1000U);
+    }
+}
+
+static void test_frictionless_motion_and_stop(void)
+{
+    const char *name = "frictionless_motion_and_stop";
+    smart_knob_modes_reset_defaults();
+    reset_controller(SMART_KNOB_MODE_FRICTIONLESS);
+    /* The 1 A/s specification applies to the mean loss compensation. The
+       angle-dependent component has a separate, tested entry envelope. */
+    smart_knob_set_test_cogging_scale(0.0f);
+    require_true(name, smart_knob_modes_count() == 13U &&
+        smart_knob_active_config()->config.min_position > smart_knob_active_config()->config.max_position,
+        "new preset is appended and has no endstops");
+    for (unsigned i = 0; i < 1000U; ++i) {
+        advance_and_handle((i & 1U) ? 0.00038f : 0.0f, (i & 1U) ? 0.08f : -0.08f, 1000U);
+        require_true(name, commanded_current_ma == 0.0f && zero_current_tracking,
+            "stationary encoder noise must retain zero torque tracking without requesting assist");
+    }
+    float previous = 0.0f;
+    for (unsigned i = 0; i < 200U; ++i) {
+        move_for(10.0f, 1U);
+        require_true(name, commanded_current_ma >= 0.0f &&
+            commanded_current_ma - previous <= 1.01f,
+            "assist must follow motion with a bounded attack rate");
+        previous = commanded_current_ma;
+    }
+    require_true(name, commanded_current_ma > 10.0f && zero_current_tracking,
+        "sustained motion gets loss compensation and active current tracking");
+    move_for(-10.0f, 1U);
+    require_true(name, commanded_current_ma == 0.0f,
+        "a reversal must immediately discard the old assist");
+    move_for(-10.0f, 100U);
+    require_true(name, commanded_current_ma < -10.0f,
+        "intentional reverse motion must get reverse compensation");
+    motor_rps = -10.0f; /* Legacy 2 Hz filter still reports the previous spin. */
+    motor_rps_fast = 0.0f;
+    fake_time_us += 1000U;
+    handle_smart_knob();
+    require_true(name, commanded_current_ma == 0.0f && zero_current_tracking,
+        "a stopped shaft must not be driven by the lagging legacy speed");
+    move_for(3.0f, 25U);
+    require_true(name, commanded_current_ma == 0.0f,
+        "a brief cogging rebound after stopping must receive no assist");
+}
+
+static void test_frictionless_limits_and_recovery(void)
+{
+    const char *name = "frictionless_limits_and_recovery";
+    smart_knob_modes_reset_defaults();
+    reset_controller(SMART_KNOB_MODE_FRICTIONLESS);
+    smart_knob_set_test_cogging_scale(0.0f);
+    SmartKnobModeConfig *mode = smart_knob_mode_get_mutable(SMART_KNOB_MODE_FRICTIONLESS);
+    require_true(name, fabsf(mode->tuning.current_limit_a - 0.8f) < 0.0001f &&
+        mode->tuning.max_current_permille == 700U,
+        "default mode and safety ratio must allow the full 800 mA output range");
+    LocalProfileEdit projection;
+    uint8_t mask = 0U;
+    require_true(name, smart_knob_mode_local_projection(SMART_KNOB_MODE_FRICTIONLESS,
+        &projection, &mask) && projection.current_limit_10ma == 80U &&
+        (mask & SMART_KNOB_LOCAL_UNREPRESENTABLE_LIMIT) == 0U,
+        "OLED projection must represent 800 mA without truncating the saved limit");
+    projection.dirty_mask = LOCAL_PROFILE_DIRTY_LIMIT;
+    projection.current_limit_10ma = 90U;
+    require_true(name, smart_knob_mode_apply_local_edit(&projection) &&
+        fabsf(mode->tuning.current_limit_a - 0.8f) < 0.0001f,
+        "OLED limit edits must clamp to 800 mA for frictionless");
+    require_true(name, smart_knob_mode_local_current_limit_max_ma(SMART_KNOB_MODE_COARSE_STRONG) == 450U,
+        "other local modes must keep their existing 450 mA range");
+    mode->tuning.current_scale_a = 1000.0f;
+    move_for(10.0f, 1100U);
+    require_true(name, fabsf(commanded_current_ma - 800.0f) <= 0.1f,
+        "800 mA must be reachable with the preset safety ratio");
+    mode->tuning.current_limit_a = 1.2f;
+    mode->tuning.max_current_permille = 1000U;
+    move_for(10.0f, 1100U);
+    require_true(name, fabsf(commanded_current_ma - 800.0f) <= 0.1f,
+        "even extreme host tuning must respect the frictionless 800 mA ceiling");
+    move_for(-10.0f, 1100U);
+    require_true(name, fabsf(commanded_current_ma + 800.0f) <= 0.1f,
+        "the reverse output limit must also be exactly 800 mA");
+    mode->tuning.max_current_permille = 10U;
+    move_for(10.0f, 100U);
+    require_true(name, commanded_current_ma <= 12.01f,
+        "the existing current safety ratio must still apply");
+    mode->tuning.current_limit_a = 0.005f;
+    move_for(10.0f, 10U);
+    require_true(name, commanded_current_ma <= 5.01f, "mode current limit must still apply");
+    move_for(46.0f, 100U);
+    require_true(name, fabsf(commanded_current_ma - 5.0f) < 0.01f && zero_current_tracking,
+        "frictionless assist must not derate above the old 45 rad/s threshold");
+    move_for(65.0f, 50U);
+    require_true(name, fabsf(commanded_current_ma - 5.0f) < 0.01f,
+        "frictionless assist must bypass the legacy 60 rad/s inhibit");
+    move_for(10.0f, 100U);
+    require_true(name, commanded_current_ma > 0.0f, "assist must recover after speed returns to range");
+    advance_and_handle(mechanical_rad + 2.0f, 10.0f, 1000U);
+    require_true(name, commanded_current_ma == 0.0f, "encoder discontinuities must inhibit assist");
+    move_for(10.0f, 100U);
+    require_true(name, commanded_current_ma > 0.0f, "valid samples must recover after an encoder glitch");
+    advance_and_handle(mechanical_rad, NAN, 1000U);
+    require_true(name, commanded_current_ma == 0.0f, "non-finite speed must never reach the actuator");
+    move_for(10.0f, 100U);
+    error_code = 1U;
+    move_for(10.0f, 1U);
+    require_true(name, commanded_current_ma == 0.0f, "faults must remove assist");
+    error_code = 0U;
+    output_enabled = 0U;
+    move_for(10.0f, 100U);
+    require_true(name, commanded_current_ma == 0.0f, "disabled output must discard assist state");
+    output_enabled = 1U;
+    advance_and_handle(mechanical_rad, 10.0f, 50000U);
+    require_true(name, commanded_current_ma == 0.0f, "stale control steps must not continue assist");
+    mode->tuning.current_scale_a = 0.0f;
+    move_for(10.0f, 100U);
+    require_true(name, commanded_current_ma == 0.0f && zero_current_tracking,
+        "zero compensation at speed must still cancel back EMF through the PI loop");
+    (void)smart_knob_select_mode(SMART_KNOB_MODE_CUSTOM);
+    move_for(10.0f, 10U);
+    require_true(name, commanded_current_ma == 0.0f && !zero_current_tracking,
+        "leaving frictionless must restore the legacy zero-output policy");
+}
+
+static void test_frictionless_unlimited_speed(void)
+{
+    const char *name = "frictionless_unlimited_speed";
+    smart_knob_modes_reset_defaults();
+    reset_controller(SMART_KNOB_MODE_FRICTIONLESS);
+    smart_knob_set_test_cogging_scale(0.0f);
+    SmartKnobModeConfig *mode = smart_knob_mode_get_mutable(SMART_KNOB_MODE_FRICTIONLESS);
+    require_true(name, fabsf(mode->tuning.current_scale_a - 0.987f) < 0.0001f &&
+        fabsf(mode->tuning.friction_current_a - 0.022f) < 0.0001f &&
+        fabsf(mode->tuning.viscous_friction_a_per_rad_s - 0.000304f) < 1e-7f &&
+        mode->tuning.p_gain == 8.0f && fabsf(mode->tuning.d_gain - 0.010f) < 1e-7f,
+        "the calibrated loss and virtual inertia preset must be available through normal mode configuration");
+    /* Isolate the unrestricted loss law; acceleration and observer behavior
+       are covered by the inertia cases at physically useful speeds. */
+    mode->tuning.p_gain = 0.0f;
+    const float speeds[] = {10.0f, 20.0f, 30.0f, 45.0f, 60.0f, 80.0f, 120.0f,
+                            250.0f, 1000.0f, 2000.0f, 3000.0f, -120.0f, -250.0f, -3000.0f};
+    for (unsigned i = 0U; i < sizeof(speeds) / sizeof(speeds[0]); ++i) {
+        const float velocity = speeds[i];
+        move_for(velocity, 1100U);
+        const float expected_ma = copysignf(fminf(800.0f,
+            987.0f * (0.022f + 0.000304f * fabsf(velocity))), velocity);
+        require_true(name, fabsf(commanded_current_ma - expected_ma) < 0.1f,
+            "both directions must receive the full requested current regardless of speed");
+        const SmartKnobRuntimeState state = runtime_state(name);
+        require_true(name, (state.flags & (1U << 3)) != 0U && (state.flags & (1U << 5)) == 0U,
+            "continuous high-speed samples must remain valid without a speed inhibit flag");
+    }
+    /* A large mismatch remains a sensor discontinuity even during fast spin. */
+    advance_and_handle(mechanical_rad + 2.0f, -120.0f, 1000U);
+    require_true(name, commanded_current_ma == 0.0f,
+        "removing speed caps must not remove the encoder discontinuity check");
+    move_for(-120.0f, 300U);
+    require_true(name, commanded_current_ma < -50.0f,
+        "valid high-speed samples must recover after a discontinuity");
+    over_vol_flag = 1U;
+    move_for(-120.0f, 1U);
+    require_true(name, commanded_current_ma == 0.0f, "overvoltage must still stop assist at high speed");
+    over_vol_flag = 0U;
+    (void)smart_knob_select_mode(SMART_KNOB_MODE_UNBOUNDED_SMOOTH);
+    move_for(65.0f, 10U);
+    require_true(name, commanded_current_ma == 0.0f &&
+        (runtime_state(name).flags & (1U << 5)) != 0U,
+        "legacy modes must retain their high-speed inhibit after leaving frictionless");
+    (void)smart_knob_select_mode(SMART_KNOB_MODE_FRICTIONLESS);
+    require_true(name, (runtime_state(name).flags & (1U << 5)) == 0U,
+        "entering frictionless must immediately clear a legacy speed latch");
+    move_for(120.0f, 300U);
+    require_true(name, commanded_current_ma > 50.0f,
+        "switching from an inhibited legacy mode must restore high-speed frictionless assist");
+}
+
+/* These fixtures set their own tuning so control invariants do not depend on
+   the calibration values eventually selected for the product preset. */
+static SmartKnobModeConfig *reset_frictionless_fixture(float start_angle, float ripple_gain)
+{
+    smart_knob_modes_reset_defaults();
+    reset_controller(SMART_KNOB_MODE_FRICTIONLESS);
+    smart_knob_set_test_cogging_scale(ripple_gain);
+    SmartKnobModeConfig *mode = smart_knob_mode_get_mutable(SMART_KNOB_MODE_FRICTIONLESS);
+    mode->tuning.p_gain = 0.0f;
+    mode->tuning.d_gain = 0.0f;
+    mode->tuning.current_scale_a = 1.0f;
+    mode->tuning.friction_current_a = 0.040f;
+    mode->tuning.viscous_friction_a_per_rad_s = 0.0f;
+    mode->tuning.current_limit_a = 0.8f;
+    mode->tuning.max_current_permille = 1000U;
+    mechanical_rad = start_angle;
+    init_smart_knob();
+    advance_and_handle(start_angle, 0.0f, 301000U);
+    advance_and_handle(start_angle, 0.0f, 1000U);
+    return mode;
+}
+
+static float settled_mean_loss(float velocity, float running_friction_a, float viscous_a_per_rad_s)
+{
+    SmartKnobModeConfig *mode = reset_frictionless_fixture(0.0f, 0.0f);
+    mode->tuning.friction_current_a = running_friction_a;
+    mode->tuning.viscous_friction_a_per_rad_s = viscous_a_per_rad_s;
+    /* Establish intentional motion first, then test the already-armed taper. */
+    move_for(copysignf(6.0f, velocity), 100U);
+    move_for(velocity, 200U);
+    return commanded_current_ma;
+}
+
+static void test_frictionless_low_speed_loss_properties(void)
+{
+    const char *name = "frictionless_low_speed_loss_properties";
+    const float speeds[] = {0.2001f, 0.25f, 0.35f, 0.45f, 0.55f,
+                            0.599f, 0.600f, 0.601f, 1.0f, 2.0f,
+                            3.0f, 4.0f, 6.0f, 8.0f, 12.0f};
+    float forward[sizeof(speeds) / sizeof(speeds[0])];
+    float previous_taper = 0.0f;
+    for (unsigned i = 0U; i < sizeof(speeds) / sizeof(speeds[0]); ++i) {
+        forward[i] = settled_mean_loss(speeds[i], 0.040f, 0.0f);
+        const float reverse = settled_mean_loss(-speeds[i], 0.040f, 0.0f);
+        require_true(name, forward[i] >= 0.0f && forward[i] < 80.0f &&
+            fabsf(forward[i] + reverse) < 0.01f,
+            "the low-speed shoulder and taper must remain bounded and directionally symmetric");
+        if (i > 0U && i <= 5U) require_true(name, forward[i] > forward[i - 1U],
+            "armed low-speed assistance must rise toward full compensation");
+        if (i <= 7U) {
+            /* Separate the gate from the declining running-loss shoulder.
+               Their product can peak just before the gate reaches one, even
+               though the gate itself remains smooth and monotone. */
+            const float viscous_only = settled_mean_loss(speeds[i], 0.0f, 0.000275f);
+            const float taper = viscous_only / (0.275f * speeds[i]);
+            require_true(name, taper >= previous_taper - 1e-5f && taper <= 1.00001f,
+                "the stop-to-full taper itself must rise monotonically without overshoot");
+            if (i >= 6U) require_true(name, fabsf(taper - 1.0f) < 1e-5f,
+                "the assist gate must be fully open at and above the full-speed threshold");
+            previous_taper = taper;
+        }
+        if (i > 7U) require_true(name, forward[i] <= forward[i - 1U] + 0.01f,
+            "extra low-speed loss must fade as speed rises instead of creating a high-speed boost");
+    }
+    require_true(name, forward[0] < 0.01f,
+        "the armed taper must approach zero continuously at the stop threshold");
+    require_true(name, forward[6] >= 40.0f && forward[10] > forward[14] + 0.01f,
+        "full compensation must be available at 0.6 rad/s and the slow-running shoulder must be present");
+    require_true(name, fabsf(forward[6] - forward[5]) < 0.05f &&
+        fabsf(forward[7] - forward[6]) < 0.05f,
+        "crossing the full-compensation threshold must not create a current discontinuity");
+    require_true(name, fabsf(settled_mean_loss(3.0f, 0.020f, 0.0f) * 2.0f - forward[10]) < 0.01f,
+        "the complete low-speed loss must remain proportional to running friction");
+    const float normal_speeds[] = {12.0f, 20.0f, 60.0f, 120.0f};
+    for (unsigned i = 0U; i < sizeof(normal_speeds) / sizeof(normal_speeds[0]); ++i) {
+        const float speed = normal_speeds[i];
+        const float expected = 40.0f + 0.275f * speed;
+        require_true(name, fabsf(settled_mean_loss(speed, 0.040f, 0.000275f) - expected) < 0.03f &&
+            fabsf(settled_mean_loss(-speed, 0.040f, 0.000275f) + expected) < 0.03f,
+            "medium and high speeds must retain the measured approximately linear loss model");
+    }
+
+    SmartKnobModeConfig *mode = reset_frictionless_fixture(0.0f, 1.0f);
+    mode->tuning.friction_current_a = 0.0f;
+    const float zero_loss_speeds[] = {0.0f, 0.1f, 0.59f, 6.0f, 0.3f, 120.0f, -6.0f, -0.3f};
+    for (unsigned i = 0U; i < sizeof(zero_loss_speeds) / sizeof(zero_loss_speeds[0]); ++i) {
+        move_for(zero_loss_speeds[i], 200U);
+        require_true(name, commanded_current_ma == 0.0f,
+            "zero running and viscous loss with inertia off must produce no shoulder or spatial request");
+    }
+    reset_frictionless_fixture(0.0f, 1.0f);
+    move_for(0.0f, 200U);
+    move_for(0.59f, 200U);
+    require_true(name, commanded_current_ma == 0.0f && zero_current_tracking,
+        "the stronger slow-running compensation must not arm at rest or below the start threshold");
+    move_for(0.6f, 100U);
+    require_true(name, commanded_current_ma > 0.0f,
+        "confirmed motion at the start threshold must receive compensation");
+    move_for(0.0f, 1U);
+    require_true(name, commanded_current_ma == 0.0f && zero_current_tracking,
+        "stopping must still clear all low-speed compensation immediately");
+}
+
+static void observe_for(float velocity, uint32_t milliseconds)
+{
+    for (uint32_t i = 0U; i < milliseconds; ++i) {
+        mechanical_rad += velocity * 0.001f;
+        motor_rps = velocity;
+        motor_rps_fast = velocity;
+        fake_time_us += 1000U;
+        smart_knob_observe_motion();
+    }
+}
+
+static void test_frictionless_observer_does_not_write_actuator(void)
+{
+    const char *name = "frictionless_observer_does_not_write_actuator";
+    reset_frictionless_fixture(0.0f, 1.0f);
+    MotorDriverSetCurrentRealContinuous(37.0f); /* The diagnostic owns this command. */
+    const uint32_t writes_before = actuator_write_count;
+    observe_for(6.0f, 200U);
+    require_true(name, runtime_state(name).commanded_current_ma > 20.0f,
+        "observation must update and arm the normal haptic controller");
+    require_true(name, actuator_write_count == writes_before &&
+        commanded_current_ma == 37.0f && !zero_current_tracking,
+        "normal observation must preserve the diagnostic's sole actuator command");
+
+    error_code = 1U;
+    observe_for(6.0f, 1U);
+    require_true(name, runtime_state(name).commanded_current_ma == 0.0f,
+        "observed faults must reset the simulated haptic output");
+    error_code = 0U;
+    output_enabled = 0U;
+    observe_for(6.0f, 1U);
+    output_enabled = 1U;
+    mechanical_rad += 2.0f;
+    observe_for(6.0f, 1U);
+    require_true(name, (runtime_state(name).flags & (1U << 3)) == 0U,
+        "observation must still reject encoder discontinuities");
+    init_smart_knob();
+    observe_for(6.0f, 1U); /* Startup inhibit is also an output-free path. */
+    require_true(name, actuator_write_count == writes_before && commanded_current_ma == 37.0f,
+        "fault, disabled, invalid-sample and startup observation must never write the actuator");
+}
+
+static void test_frictionless_observed_handover_is_continuous(void)
+{
+    const char *name = "frictionless_observed_handover_is_continuous";
+    float continuous[12];
+    reset_frictionless_fixture(0.0f, 1.0f);
+    move_for(6.0f, 500U);
+    for (unsigned i = 0U; i < 12U; ++i) {
+        move_for(6.0f, 1U);
+        continuous[i] = commanded_current_ma;
+    }
+
+    reset_frictionless_fixture(0.0f, 1.0f);
+    MotorDriverSetCurrentRealContinuous(61.0f);
+    const uint32_t writes_before = actuator_write_count;
+    observe_for(6.0f, 500U);
+    require_true(name, actuator_write_count == writes_before,
+        "the diagnostic pulse must remain the sole actuator owner throughout observation");
+    for (unsigned i = 0U; i < 12U; ++i) {
+        move_for(6.0f, 1U);
+        require_true(name, fabsf(commanded_current_ma - continuous[i]) < 0.01f &&
+            commanded_current_ma > 20.0f && zero_current_tracking,
+            "the first release sample and later samples must match continuous control without settling or rearming");
+    }
+}
+
+static float settled_frictionless_output(float angle, float velocity, float ripple_gain)
+{
+    reset_frictionless_fixture(angle - velocity * 0.12f, ripple_gain);
+    move_for(velocity, 120U);
+    return commanded_current_ma;
+}
+
+static void test_frictionless_spatial_ripple(void)
+{
+    const char *name = "frictionless_spatial_ripple";
+    const float pitch = 2.0f * PI;
+    float spatial_sum = 0.0f, spatial_min = 0.0f, spatial_max = 0.0f;
+    /* Uniform full-turn integration resolves all three identified mechanical
+       harmonics (7, 12 and 14), whose common period is one revolution. */
+    for (unsigned i = 0U; i < 128U; ++i) {
+        const float angle = pitch * (float)i / 128.0f;
+        const float forward_base = settled_frictionless_output(angle, 6.0f, 0.0f);
+        const float reverse_base = settled_frictionless_output(angle, -6.0f, 0.0f);
+        const float spatial = settled_frictionless_output(angle, 6.0f, 1.0f) - forward_base;
+        const float reverse_spatial = settled_frictionless_output(angle, -6.0f, 1.0f) - reverse_base;
+        const float next_period = settled_frictionless_output(angle + pitch, 6.0f, 1.0f) - forward_base;
+        const float fast_base = settled_frictionless_output(angle, 120.0f, 0.0f);
+        const float fast_spatial = settled_frictionless_output(angle, 120.0f, 1.0f) - fast_base;
+        require_true(name, forward_base >= 40.0f &&
+            fabsf(forward_base + reverse_base) < 0.01f,
+            "angle gain zero must isolate a directionally symmetric running-loss request");
+        require_true(name, fabsf(spatial - reverse_spatial) < 0.05f,
+            "the spatial correction at the same angle must keep its sign when rotation reverses");
+        require_true(name, fabsf(spatial - next_period) < 0.05f,
+            "the combined mechanical angle map must repeat every full revolution");
+        require_true(name, fabsf(spatial - fast_spatial) < 0.1f,
+            "angle compensation must have no mean-slew-induced phase lag at higher speed");
+        require_true(name, fabsf(spatial) < 32.3f,
+            "the combined map must remain within the sum of its three harmonic amplitudes");
+        spatial_sum += spatial;
+        spatial_min = fminf(spatial_min, spatial);
+        spatial_max = fmaxf(spatial_max, spatial);
+    }
+    require_true(name, spatial_min < -25.0f && spatial_max > 25.0f,
+        "the measured combined map must retain both restoring-current polarities");
+    require_true(name, fabsf(spatial_sum / 128.0f) < 0.01f,
+        "full-revolution angle integration must reveal no directional DC torque bias");
+}
+
+static float settled_scaled_frictionless_output(float angle, float velocity, float scale, float ripple_gain)
+{
+    SmartKnobModeConfig *mode = reset_frictionless_fixture(angle - velocity * 1.2f, ripple_gain);
+    mode->tuning.friction_current_a = 0.020f;
+    mode->tuning.current_scale_a = scale;
+    move_for(velocity, 1199U);
+    /* Remove accumulated float integration error so the large-gain comparison
+       samples exactly the same encoder angle. This is still a valid step. */
+    advance_and_handle(angle, velocity, 1000U);
+    return commanded_current_ma;
+}
+
+static void test_frictionless_ripple_envelope_limits_and_stop(void)
+{
+    const char *name = "frictionless_ripple_envelope_limits_and_stop";
+    float mean_only[120], established_spatial[120];
+    for (unsigned i = 0U; i < 120U; ++i) {
+        const float angle = 0.010f * (float)(i + 1U);
+        const float mean = settled_frictionless_output(angle, 10.0f, 0.0f);
+        established_spatial[i] = settled_frictionless_output(angle, 10.0f, 1.0f) - mean;
+    }
+    reset_frictionless_fixture(0.0f, 0.0f);
+    for (unsigned i = 0U; i < 120U; ++i) {
+        move_for(10.0f, 1U);
+        mean_only[i] = commanded_current_ma;
+    }
+    reset_frictionless_fixture(0.0f, 1.0f);
+    float max_established_ripple = 0.0f;
+    for (unsigned i = 0U; i < 120U; ++i) {
+        move_for(10.0f, 1U);
+        const float ripple = fabsf(commanded_current_ma - mean_only[i]);
+        if (i < 5U) require_true(name, ripple == 0.0f, "angle compensation must wait for confirmed motion");
+        const float entry_fraction = fminf(1.0f, i >= 5U ? (float)(i - 4U) / 50.0f : 0.0f);
+        require_true(name, ripple <= 32.3f * entry_fraction + 0.01f,
+            "entry must ramp the combined angle-map envelope over 50 ms");
+        if (i >= 55U) {
+            require_true(name, fabsf((commanded_current_ma - mean_only[i]) - established_spatial[i]) < 0.05f,
+                "after entry the complete map must match established motion at the same angle");
+            max_established_ripple = fmaxf(max_established_ripple, ripple);
+        }
+    }
+    require_true(name, max_established_ripple > 20.0f,
+        "the full spatial correction must be available after the 50 ms entry ramp");
+    move_for(0.0f, 1U);
+    require_true(name, commanded_current_ma == 0.0f && zero_current_tracking,
+        "stopping must remove both the mean and spatial current exactly");
+    move_for(3.0f, 25U);
+    require_true(name, commanded_current_ma == 0.0f,
+        "the angle term must not bypass the stop/rebound rearm delay");
+    move_for(6.0f, 120U);
+    error_code = 1U;
+    move_for(6.0f, 1U);
+    require_true(name, commanded_current_ma == 0.0f, "faults must also clear the spatial component");
+    error_code = 0U;
+    move_for(6.0f, 120U);
+    over_vol_flag = 1U;
+    move_for(6.0f, 1U);
+    require_true(name, commanded_current_ma == 0.0f, "overvoltage must clear the spatial component");
+
+    SmartKnobModeConfig *mode = reset_frictionless_fixture(0.0f, 1.0f);
+    mode->tuning.current_scale_a = 1000.0f;
+    mode->tuning.current_limit_a = 1.2f;
+    bool reached_positive_cap = false, reached_negative_cap = false;
+    for (unsigned i = 0U; i < 2400U; ++i) {
+        const float velocity = i < 1200U ? 10.0f : -10.0f;
+        move_for(velocity, 1U);
+        require_true(name, fabsf(commanded_current_ma) <= 800.01f,
+            "mean plus spatial compensation must obey the independent 800 mA ceiling");
+        reached_positive_cap |= commanded_current_ma > 799.9f;
+        reached_negative_cap |= commanded_current_ma < -799.9f;
+    }
+    require_true(name, reached_positive_cap && reached_negative_cap,
+        "both signs of the combined output must reach but not exceed the hard cap");
+    mode->tuning.current_limit_a = 0.3f;
+    for (unsigned i = 0U; i < 100U; ++i) {
+        move_for(10.0f, 1U);
+        require_true(name, fabsf(commanded_current_ma) <= 300.01f,
+            "the mode current limit must clamp the combined spatial and mean request");
+    }
+    mode->tuning.current_limit_a = 1.2f;
+    mode->tuning.max_current_permille = 10U;
+    for (unsigned i = 0U; i < 100U; ++i) {
+        move_for(-10.0f, 1U);
+        require_true(name, fabsf(commanded_current_ma) <= 12.01f,
+            "the global safety ratio must also clamp the combined request during reversal");
+    }
+    bool opposed_forward_motion = false, opposed_reverse_motion = false;
+    for (unsigned direction = 0U; direction < 2U; ++direction) {
+        const float velocity = direction == 0U ? 6.0f : -6.0f;
+        for (unsigned i = 0U; i < 64U; ++i) {
+            const float angle = 2.0f * PI * (float)i / 64.0f;
+            const float calibrated = settled_scaled_frictionless_output(angle, velocity, 1.0f, 1.0f);
+            const float mean = settled_scaled_frictionless_output(angle, velocity, 1.0f, 0.0f);
+            const float saturated = settled_scaled_frictionless_output(angle, velocity, 1000.0f, 1.0f);
+            /* Preserve the shape relative to the complete running loss,
+               including any speed-dependent shoulder, when its mean clips. */
+            const float expected = fmaxf(-800.0f, fminf(800.0f, calibrated * 800.0f / fabsf(mean)));
+            require_true(name, fabsf(saturated - expected) < 0.1f,
+                "mean saturation must scale the spatial calibration proportionally before the final clamp");
+            if (calibrated * velocity < 0.0f) {
+                if (direction == 0U) opposed_forward_motion = true;
+                else opposed_reverse_motion = true;
+            }
+        }
+    }
+    require_true(name, opposed_forward_motion && opposed_reverse_motion,
+        "a spatial restoring torque larger than mean friction may correctly oppose motion at some angles");
+}
+
+static SmartKnobModeConfig *reset_inertia_fixture(float multiplier, float filter_seconds)
+{
+    SmartKnobModeConfig *mode = reset_frictionless_fixture(0.0f, 0.0f);
+    mode->tuning.friction_current_a = 0.0f;
+    mode->tuning.p_gain = multiplier;
+    mode->tuning.d_gain = filter_seconds;
+    return mode;
+}
+
+static void test_frictionless_inertia_follows_acceleration(void)
+{
+    const char *name = "frictionless_inertia_follows_acceleration";
+    SmartKnobModeConfig *mode = reset_inertia_fixture(2.0f, 0.020f);
+    for (unsigned i = 0U; i < 100U; ++i) {
+        move_for(6.0f, 1U);
+        require_true(name, commanded_current_ma == 0.0f,
+            "arming into an established speed must not create an inertia kick");
+    }
+    for (unsigned i = 1U; i <= 200U; ++i) move_for(6.0f + 0.020f * (float)i, 1U);
+    require_true(name, commanded_current_ma < -5.0f && commanded_current_ma > -5.5f,
+        "two extra rotor inertias must oppose a sustained 20 rad/s squared acceleration by about 5.4 mA");
+    move_for(10.0f, 500U);
+    require_true(name, fabsf(commanded_current_ma) < 0.01f,
+        "the newly selected constant speed must have no inertia drag or return-to-speed request");
+    for (unsigned i = 1U; i <= 300U; ++i) move_for(10.0f - 0.020f * (float)i, 1U);
+    require_true(name, commanded_current_ma > 5.0f && commanded_current_ma < 5.5f,
+        "deceleration must receive forward inertia current instead of velocity damping");
+    move_for(0.3f, 500U);
+    require_true(name, fabsf(commanded_current_ma) < 0.01f && zero_current_tracking,
+        "an already armed shaft held at a new continuous slow speed must not be locked to its old speed");
+
+    move_for(-6.0f, 100U);
+    for (unsigned i = 1U; i <= 200U; ++i) move_for(-6.0f - 0.020f * (float)i, 1U);
+    require_true(name, commanded_current_ma > 5.0f && commanded_current_ma < 5.5f,
+        "reverse acceleration must receive the opposite inertia polarity");
+    move_for(-10.0f, 500U);
+    for (unsigned i = 1U; i <= 200U; ++i) move_for(-10.0f + 0.020f * (float)i, 1U);
+    require_true(name, commanded_current_ma < -5.0f && commanded_current_ma > -5.5f,
+        "reverse deceleration must assist the existing negative rotation");
+    mode->tuning.p_gain = 0.0f;
+    move_for(-5.0f, 1U);
+    require_true(name, commanded_current_ma == 0.0f, "gain zero must disable inertia immediately");
+    mode->tuning.p_gain = 2.0f;
+    move_for(-5.0f, 1U);
+    require_true(name, commanded_current_ma == 0.0f,
+        "enabling inertia while moving must initialize from the current speed");
+}
+
+static void test_frictionless_inertia_stop_and_recovery(void)
+{
+    const char *name = "frictionless_inertia_stop_and_recovery";
+    reset_inertia_fixture(4.0f, 0.020f);
+    move_for(6.0f, 100U);
+    move_for(10.0f, 1U);
+    require_true(name, commanded_current_ma < -1.0f, "fixture must contain an acceleration history");
+    move_for(0.0f, 1U);
+    require_true(name, commanded_current_ma == 0.0f && zero_current_tracking,
+        "stopping must erase inertia torque while retaining normal zero Iq tracking");
+    for (unsigned i = 0U; i < 100U; ++i) {
+        move_for(-6.0f, 1U);
+        require_true(name, commanded_current_ma == 0.0f,
+            "rebound, deliberate reversal and rearming must not replay the old acceleration");
+    }
+    /* Check each reset while the velocity memory contains a real transient. */
+    for (unsigned reset = 0U; reset < 4U; ++reset) {
+        move_for(-6.0f, 100U);
+        move_for(-10.0f, 1U);
+        require_true(name, commanded_current_ma > 1.0f, "reset fixture must have nonzero inertia");
+        if (reset == 0U) error_code = 1U;
+        if (reset == 1U) output_enabled = 0U;
+        if (reset == 2U) over_vol_flag = 1U;
+        if (reset == 3U) advance_and_handle(mechanical_rad, -10.0f, 50000U);
+        else move_for(-10.0f, 1U);
+        require_true(name, commanded_current_ma == 0.0f && !zero_current_tracking,
+            "fault, disabled output, overvoltage and stale samples must take the zero-output fault path");
+        error_code = 0U;
+        output_enabled = 1U;
+        over_vol_flag = 0U;
+        for (unsigned i = 0U; i < 100U; ++i) {
+            move_for(-10.0f, 1U);
+            require_true(name, commanded_current_ma == 0.0f,
+                "recovery at a constant speed must start with fresh inertia history");
+        }
+    }
+}
+
+static float inertia_step_response(float multiplier, float filter_seconds)
+{
+    reset_inertia_fixture(multiplier, filter_seconds);
+    move_for(6.0f, 100U);
+    move_for(6.1f, 1U);
+    return commanded_current_ma;
+}
+
+static void test_frictionless_inertia_parameter_and_current_limits(void)
+{
+    const char *name = "frictionless_inertia_parameter_and_current_limits";
+    const float default_filter = inertia_step_response(2.0f, 0.0f);
+    require_true(name, fabsf(default_filter - inertia_step_response(2.0f, 0.020f)) < 0.001f,
+        "zero D must select the default 20 ms inertia filter");
+    require_true(name, fabsf(inertia_step_response(80.0f, 0.020f) -
+                             inertia_step_response(8.0f, 0.020f)) < 0.001f,
+        "host input must not exceed eight extra inertias");
+    require_true(name, fabsf(inertia_step_response(2.0f, 0.001f) -
+                             inertia_step_response(2.0f, 0.005f)) < 0.001f &&
+                       fabsf(inertia_step_response(2.0f, 1.0f) -
+                             inertia_step_response(2.0f, 0.200f)) < 0.001f,
+        "the inertia filter must clamp to the supported 5 to 200 ms range");
+    require_true(name, inertia_step_response(INFINITY, 0.020f) == 0.0f,
+        "non-finite inertia gain must never reach the actuator");
+    require_true(name, fabsf(inertia_step_response(2.0f, INFINITY) - default_filter) < 0.001f,
+        "non-finite filter time must use the finite default");
+
+    SmartKnobModeConfig *mode = reset_inertia_fixture(8.0f, 0.005f);
+    move_for(6.0f, 100U);
+    move_for(120.0f, 1U);
+    require_true(name, fabsf(commanded_current_ma + 40.0f) < 0.01f,
+        "the inertia component must independently clamp to minus 40 mA");
+    move_for(120.0f, 200U);
+    move_for(6.0f, 1U);
+    require_true(name, fabsf(commanded_current_ma - 40.0f) < 0.01f,
+        "the inertia component must independently clamp to plus 40 mA");
+    mode->tuning.current_limit_a = 0.005f;
+    move_for(120.0f, 1U);
+    require_true(name, fabsf(commanded_current_ma + 5.0f) < 0.01f,
+        "the mode limit must also clamp inertia torque");
+    mode->tuning.current_limit_a = 1.2f;
+    mode->tuning.max_current_permille = 10U;
+    move_for(120.0f, 200U);
+    move_for(6.0f, 1U);
+    require_true(name, fabsf(commanded_current_ma - 12.0f) < 0.01f,
+        "the safety ratio must also clamp inertia torque");
+    mode->tuning.max_current_permille = 1000U;
+    mode->tuning.friction_current_a = 0.8f;
+    smart_knob_set_test_cogging_scale(1.0f);
+    for (unsigned direction = 0U; direction < 2U; ++direction) {
+        const float sign = direction == 0U ? 1.0f : -1.0f;
+        move_for(sign * 120.0f, 1200U);
+        move_for(sign * 6.0f, 1U);
+        require_true(name, fabsf(commanded_current_ma - sign * 800.0f) < 0.01f,
+            "mean, angle correction and inertia together must respect the 800 mA hard cap in both directions");
+    }
+}
+
+static void test_frictionless_inertia_observer_continuity(void)
+{
+    const char *name = "frictionless_inertia_observer_continuity";
+    float reference[20];
+    for (unsigned observed = 0U; observed < 2U; ++observed) {
+        reset_inertia_fixture(4.0f, 0.020f);
+        MotorDriverSetCurrentRealContinuous(61.0f);
+        const uint32_t writes_before = actuator_write_count;
+        for (unsigned i = 0U; i < 300U; ++i) {
+            const float velocity = 3.0f + 0.010f * (float)i;
+            if (observed != 0U) observe_for(velocity, 1U);
+            else move_for(velocity, 1U);
+        }
+        if (observed != 0U) require_true(name, actuator_write_count == writes_before &&
+            commanded_current_ma == 61.0f,
+            "prewarming the inertia observer must leave diagnostic actuator ownership intact");
+        for (unsigned i = 0U; i < 20U; ++i) {
+            move_for(6.0f + 0.010f * (float)i, 1U);
+            if (observed == 0U) reference[i] = commanded_current_ma;
+            else require_true(name, fabsf(commanded_current_ma - reference[i]) < 0.001f &&
+                commanded_current_ma < -5.0f && zero_current_tracking,
+                "release during acceleration must preserve the prewarmed inertia state from its first sample");
+        }
+    }
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) {
@@ -345,6 +1032,29 @@ int main(int argc, char **argv)
         test_local_profile_applies_and_resets_preset_tuning();
     } else if (strcmp(argv[1], "navigation-mode") == 0) {
         test_navigation_mode_is_private_and_reversible();
+    } else if (strcmp(argv[1], "frictionless-motion") == 0) {
+        test_frictionless_motion_and_stop();
+        test_frictionless_low_speed_loss_properties();
+    } else if (strcmp(argv[1], "frictionless-limits") == 0) {
+        test_frictionless_limits_and_recovery();
+    } else if (strcmp(argv[1], "frictionless-unlimited") == 0) {
+        test_frictionless_unlimited_speed();
+    } else if (strcmp(argv[1], "frictionless-observer") == 0) {
+        test_frictionless_observer_does_not_write_actuator();
+    } else if (strcmp(argv[1], "frictionless-handover") == 0) {
+        test_frictionless_observed_handover_is_continuous();
+    } else if (strcmp(argv[1], "frictionless-spatial") == 0) {
+        test_frictionless_spatial_ripple();
+    } else if (strcmp(argv[1], "frictionless-ripple-limits") == 0) {
+        test_frictionless_ripple_envelope_limits_and_stop();
+    } else if (strcmp(argv[1], "frictionless-inertia-motion") == 0) {
+        test_frictionless_inertia_follows_acceleration();
+    } else if (strcmp(argv[1], "frictionless-inertia-reset") == 0) {
+        test_frictionless_inertia_stop_and_recovery();
+    } else if (strcmp(argv[1], "frictionless-inertia-limits") == 0) {
+        test_frictionless_inertia_parameter_and_current_limits();
+    } else if (strcmp(argv[1], "frictionless-inertia-observer") == 0) {
+        test_frictionless_inertia_observer_continuity();
     } else {
         fprintf(stderr, "unknown test case: %s\n", argv[1]);
         return EXIT_FAILURE;

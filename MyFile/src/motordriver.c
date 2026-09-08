@@ -27,6 +27,7 @@
 #define     LIMIT           (float32_t)(0.9f / SQRT3)
 #define     MOTOR_CURRENT_OUTPUT_DEADBAND_MA 60.0f
 volatile uint8_t currentloop_enable;
+static uint8_t track_zero_current;
 uint8_t motor_driver_cal_flag;
 uint8_t motor_driver_cal_init;
 volatile uint8_t motor_driver_cal_busy;
@@ -42,7 +43,7 @@ uint16_t angle_force;
 int16_t dbg_id,dbg_iq;
 
 
-extern int32_t ia,ib,ic;
+extern float32_t ia,ib,ic;
 
 float32_t sinVal, cosVal;
 float32_t iAlpha, iBeta;
@@ -147,14 +148,14 @@ static void CurrentLoopCalc(float32_t resultMax)
 
 }
 
-static void Clarke_Park(int32_t currA, int32_t currB, int32_t currC)
+static void Clarke_Park(float32_t currA, float32_t currB, float32_t currC)
 {   
     sinVal=sinf(eAngle_360 *0.01745f);
     cosVal=cosf(eAngle_360 *0.01745f);
 
 
-    iAlpha = (float32_t)currA;
-    iBeta = (float32_t)(currB - currC) * 0.5773502692f;
+    iAlpha = currA;
+    iBeta = (currB - currC) * 0.5773502692f;
 
     id = iAlpha * cosVal + iBeta * sinVal;
     iq = -iAlpha * sinVal + iBeta * cosVal;
@@ -369,6 +370,7 @@ void MotorDriverPrepareCycleFromISR(void)
         }
         if (motor_driver_cal_busy == 0U) {
             iq_curr_pi_target = command.iq_target_adc;
+            track_zero_current = command.track_zero_current;
         }
     }
 }
@@ -434,7 +436,8 @@ void MotorDriverProcess(void)
 
     if(currentloop_enable)
     {
-        if (motor_driver_cal_busy == 0U && iq_curr_pi_target == 0.0f) {
+        if (motor_driver_cal_busy == 0U && iq_curr_pi_target == 0.0f &&
+            track_zero_current == 0U) {
             /* An exact-zero command must be electrically quiet, not merely a
              * zero current target that leaves both PI loops correcting ADC
              * offset/noise around zero. Small non-zero torque requests stay
@@ -501,6 +504,7 @@ static void MotorDriverApplyModeFromISR(uint8_t val)
             GPIOB->BRR=1<<2; //DISABLE Driver Output
 
             currentloop_enable =0;//Disable current loop
+            track_zero_current = 0U;
             CurrentLoopResetOutput();
 
             break;
@@ -651,6 +655,15 @@ void MotorDriverSetCurrentRealContinuous(float32_t phase_current)
         phase_current= -1200.0f;
         iq_calc = phase_current * 1.25f ;
         FastControlPublishCurrentAdc(iq_calc);
+    }
+}
+
+void MotorDriverSetTorqueCurrent(float32_t phase_current)
+{
+    if (motor_driver_cal_busy == 0U) {
+        if (phase_current > 1200.0f) phase_current = 1200.0f;
+        if (phase_current < -1200.0f) phase_current = -1200.0f;
+        FastControlPublishTorqueCurrentAdc(phase_current * 1.25f);
     }
 }
 

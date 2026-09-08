@@ -15,8 +15,8 @@ __IO uint16_t adc1_convbuf[10];
 __IO uint16_t adc2_convbuf[10];
 
 uint16_t ia_adc,ib_adc,ic_adc,vin_adc;
-uint16_t ia_offset,ib_offset,ic_offset;
-int32_t ia,ib,ic;
+float32_t ia_offset,ib_offset,ic_offset;
+float32_t ia,ib,ic;
 
 
 float32_t theta,bx1,by1,bx2,by2;
@@ -40,13 +40,46 @@ void MyADCInit(void)
    
 }
 
-void MyADCZeroCal(void)
+uint8_t MyADCZeroCal(void)
 {
-    ia_offset=adc1_convbuf[0];
-    ib_offset=adc1_convbuf[1];
-    ic_offset=adc1_convbuf[2];
-    
-    adc_cal_ok=1;
+    enum { ZERO_CAL_SAMPLES = 256U, ZERO_CAL_TIMEOUT_MS = 100U };
+    uint32_t sum_a = 0U;
+    uint32_t sum_b = 0U;
+    uint32_t sum_c = 0U;
+    const uint32_t started_ms = HAL_GetTick();
+    const uint32_t current_samples_flag = __HAL_DMA_GET_HT_FLAG_INDEX(hadc1.DMA_Handle);
+
+    adc_cal_ok = 0U;
+    /* DMA is circular and its half-transfer interrupt is disabled. Its flag
+     * still marks each fresh set of three phase-current samples. The final
+     * three conversions leave these slots untouched while we copy them.
+     * Polling the buffer alone
+     * would repeatedly average the same sample and retain its offset noise.
+     * At startup the bridge is off and TIM1's FOC interrupt is not enabled. */
+    __HAL_DMA_CLEAR_FLAG(hadc1.DMA_Handle, current_samples_flag);
+    for (uint32_t sample = 0U; sample < ZERO_CAL_SAMPLES; ++sample) {
+        while (__HAL_DMA_GET_FLAG(hadc1.DMA_Handle, current_samples_flag) == RESET) {
+            if ((HAL_GetTick() - started_ms) >= ZERO_CAL_TIMEOUT_MS) {
+                return 0U;
+            }
+        }
+        if ((HAL_GetTick() - started_ms) >= ZERO_CAL_TIMEOUT_MS) {
+            return 0U;
+        }
+        __HAL_DMA_CLEAR_FLAG(hadc1.DMA_Handle, current_samples_flag);
+        sum_a += adc1_convbuf[0];
+        sum_b += adc1_convbuf[1];
+        sum_c += adc1_convbuf[2];
+    }
+
+    /* Publish only a complete calibration. Retain the fractional ADC count:
+     * rounding each phase zero creates an electrical-angle-dependent current
+     * bias after the Clarke/Park transform, most noticeable at low torque. */
+    ia_offset = (float32_t)sum_a / (float32_t)ZERO_CAL_SAMPLES;
+    ib_offset = (float32_t)sum_b / (float32_t)ZERO_CAL_SAMPLES;
+    ic_offset = (float32_t)sum_c / (float32_t)ZERO_CAL_SAMPLES;
+    adc_cal_ok = 1U;
+    return 1U;
 }
 
 void MyAdcProcess(void)
@@ -98,9 +131,9 @@ uint16_t MyAdcGetVal(uint8_t adc_hw,uint8_t channel)
     return adc_val;
 }
 
-int32_t MyAdcGetCurrent(uint8_t channel)
+float32_t MyAdcGetCurrent(uint8_t channel)
 {
-    int32_t current_val;
+    float32_t current_val = 0.0f;
     switch(channel)
     {
     case 1:{ current_val = ia; break;}

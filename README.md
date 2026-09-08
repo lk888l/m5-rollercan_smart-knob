@@ -10,11 +10,11 @@ The firmware's core responsibilities are:
 
 - Running the FOC current loop using TIM1 three-phase PWM and ADC sampling.
 - Obtaining the rotor angle and mechanical position through the TLE5012B SPI encoder.
-- Running 12 local Dial/SmartKnob haptic presets.
+- Running 13 local Dial/SmartKnob haptic presets, including active friction compensation.
 - Operating the local menu through detents, long presses, and double-clicks.
 - Displaying a round speed gauge, detent position, mode, and faults on the 64×48 SSD1306 OLED.
 - Showing run, pause, menu, save, and fault states with deterministic RGB effects.
-- Saving all 12 per-mode haptic tunings, Custom configuration, local fields, CAN ID, and encoder offset to internal Flash.
+- Saving all 13 per-mode haptic tunings, Custom configuration, local fields, CAN ID, and encoder offset to internal Flash.
 
 ## Quick Links
 

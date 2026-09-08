@@ -17,7 +17,7 @@ SmartKnob 触感环和用户交互全部运行在 STM32 固件中：ControlTask 
 | `MyFile/src/local_ui.c` | 仪表盘、菜单、按键事件和旋钮光标交互 |
 | `MyFile/src/mysys.c` | 本地 profile、主机控制权、事务快照、保存和启停边界 |
 | `MyFile/src/host_control.c` | 纯 C 命令分类、配置事务和 3 秒超时状态机 |
-| `MyFile/src/smart_knob_persistence.c` | 512 字节显式序列化与 CRC32 |
+| `MyFile/src/smart_knob_persistence.c` | 592 字节显式序列化、v1 迁移与 CRC32 |
 | `Core/Src/fdcan.c` | CAN function、CAN-I2C 桥接与主动遥测 |
 
 默认 SmartKnob 预设只需要修改：
@@ -27,7 +27,7 @@ SmartKnob 触感环和用户交互全部运行在 STM32 固件中：ControlTask 
 #define SMART_KNOB_DEFAULT_MODE SMART_KNOB_MODE_COARSE_STRONG
 ```
 
-固件固定以 `MODE_DIAL` 本地运行。Flash 中不存在合法本地 profile 时使用与上位机 `rollercan.rs` 对齐的 `COARSE_STRONG / 100% / 450 mA / 10°`；完整快照会恢复所有 12 个模式和 Custom 参数。
+固件固定以 `MODE_DIAL` 本地运行。Flash 中不存在合法本地 profile 时使用与上位机 `rollercan.rs` 对齐的 `COARSE_STRONG / 100% / 450 mA / 10°`；完整快照会恢复所有 13 个模式和 Custom 参数。原有 0–11 模式的编号和默认参数保持兼容。
 
 ## 内置模式
 
@@ -47,6 +47,9 @@ SmartKnob 触感环和用户交互全部运行在 STM32 固件中：ControlTask 
 | 9 | `SMART_KNOB_MODE_COARSE_WEAK` | 粗分度弱刻度，带 click |
 | 10 | `SMART_KNOB_MODE_MAGNETIC` | 仅指定位置有磁吸刻度 |
 | 11 | `SMART_KNOB_MODE_RETURN_TO_CENTER_DETENTS` | 带刻度的回中模式 |
+| 12 | `SMART_KNOB_MODE_FRICTIONLESS` | 无边界、无刻度，主动补偿转动损耗 |
+
+无摩擦模式在 OLED 菜单中显示 `FR-LESS`，仪表盘显示 `FR-L`；通过 CAN 写 `0x8001 = 12` 选择。其 `FORCE` 调整补偿比例，`STEP` 只影响位置计数，不产生刻度。控制原理、调参单位和实机测试见[无摩擦模式](frictionless-mode.md)。
 
 每个模式都是独立的 `SmartKnobModeConfig`，包含上游 SmartKnob 的位置、范围、宽度、detent/endstop、snap 和磁吸位置字段，以及本电机的 P/D、电流缩放、电流限幅、摩擦补偿和 click 电流字段。修改一个模式不会改变其他模式。
 
@@ -56,9 +59,9 @@ SmartKnob 触感环和用户交互全部运行在 STM32 固件中：ControlTask 
 
 - `FORCE`：25～125%，以 5% 为步进缩放预设的 `current_scale_a`。
 - `STEP`：1～60°，以 1° 为步进覆盖挡位宽度。
-- `LIMIT`：100～450 mA，以 50 mA 为步进限制 SmartKnob 电流。
+- `LIMIT`：FR-L 为 100～800 mA，其他模式为 100～450 mA，以 50 mA 为步进限制 SmartKnob 电流。
 
-菜单使用私有模式 `SMART_KNOB_NAVIGATION_MODE = 0xFF`。它提供 12°、双向无边界的轻挡位，只用于光标和数值交互，不计入 12 个用户预设，也不会覆盖用户模式的位置状态。上位机接管时会取消草稿并立即退出该模式。
+菜单使用私有模式 `SMART_KNOB_NAVIGATION_MODE = 0xFF`。它提供 12°、双向无边界的轻挡位，只用于光标和数值交互，不计入 13 个用户预设，也不会覆盖用户模式的位置状态。上位机接管时会取消草稿并立即退出该模式。
 
 ## 电流计算和保护
 
@@ -74,7 +77,7 @@ current = current_scale * pid + friction_current + click_current
 - 磁吸模式在非指定位置不施加 detent 弹簧。
 - click 使用 2 ms 正向 + 2 ms 反向的双相电流脉冲。
 - 单中心回弹模式在 20–45 rad/s 区间逐步削弱与旋转同向的加速电流，保留反向阻尼电流，避免长行程回正持续加速。
-- 速度达到 60 rad/s 后进入高速保护并把电流目标归零；只有速度降到 40 rad/s 后才退出，避免阈值附近反复启停。
+- 原有模式在速度达到 60 rad/s 后进入高速保护并把电流目标归零；只有速度降到 40 rad/s 后才退出，避免阈值附近反复启停。无摩擦模式 12 不使用速度衰减或高速保护锁定，连续高速采样按位置增量与快速度估计的一致性校验。
 - 电流同时受模式 `current_limit_a`、`max_current_permille` 和硬件 1.2 A 上限约束。
 - 几何中心死区内的控制意图严格为零，此时 FOC 会清空 PI、`ud` 和 `uq`；死区外通过 SmartKnob 专用入口保持小电流连续，不再按 0.09 A/60 mA 幅值硬切断，避免在约四分之一挡距处形成继电极限环。普通电流、速度和位置模式仍保留原有 60 mA 静音区。
 - idle detent-center correction 只用于无边界旋钮；有 min/max 的挡位保持固定中心网格，慢速停留不会让虚拟挡位中心追随手的位置。
@@ -94,7 +97,7 @@ current = current_scale * pid + friction_current + click_current
 | `0x8002` | 主动遥测开关 | 0 关闭，非 0 打开 |
 | `0x8003` | 主动遥测频率 | 1–100 Hz，固件限幅 |
 | `0x8004` | 遥测目标主机 ID | 0–255 |
-| `0x8005` | 模式数量，只读 | 当前为 12 |
+| `0x8005` | 模式数量，只读 | 当前为 13 |
 | `0x8006` | 遥测协议版本，只读 | 当前为 1 |
 
 默认主动遥测打开、频率 50 Hz、目标主机 ID 为 0。写 `0x8002` 或 `0x8003` 时，固件也会记录该请求帧 ID 中的主机 ID；`0x8004` 可以显式覆盖目标 ID。
@@ -112,8 +115,9 @@ current = current_scale * pid + friction_current + click_current
 | `0x8105` | 硬件电流限幅比例 | 0–1000 ‰ |
 | `0x8106` | 摩擦补偿电流 | A |
 | `0x8107` | click 脉冲电流 | A |
+| `0x8108` | 无摩擦模式的黏性损耗系数 | µA / (rad/s)，整数，默认 275 |
 
-`0x8101–0x8107` 修改当前活动模式，并在本次运行中保留；切走再切回该模式仍使用修改后的值。
+`0x8101–0x8108` 修改当前活动模式，并在本次运行中保留；切走再切回该模式仍使用修改后的值。`0x8108` 使用上表的微安单位，其余浮点 tuning 沿用 ×1000 编码。
 
 ### 自定义模式
 
@@ -173,7 +177,7 @@ write 0x7004 = 0                  先失能
 write 0x7006 = 0                  清零电流目标
 write 0x8001 = preset index       选择活动模式并开始配置事务
 write 0x8201..0x820E              若为 Custom，更新配置
-write 0x8101..0x8107              更新当前模式手感和安全参数
+write 0x8101..0x8108              更新当前模式手感和安全参数
 write 0x8004 = host id
 write 0x8003 = telemetry Hz
 write 0x8002 = 1                  打开主动遥测

@@ -30,6 +30,7 @@ extern uint8_t error_code;
 extern uint8_t over_vol_flag;
 extern float mechanical_rad;
 extern float motor_rps;
+extern float motor_rps_fast;
 extern float ph_crrent_lpf;
 
 uint32_t micros(void);

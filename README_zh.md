@@ -10,11 +10,11 @@
 
 - 通过 TIM1 三相 PWM 和 ADC 采样运行 FOC 电流环。
 - 通过 TLE5012B SPI 编码器得到转子角度和机械位置。
-- 在本地运行 12 种 Dial/SmartKnob 触感预设。
+- 在本地运行 13 种 Dial/SmartKnob 触感预设，包含主动补偿损耗的无摩擦模式。
 - 通过旋钮挡位、长按和双击操作本地菜单。
 - 在 64×48 SSD1306 OLED 上显示圆形速度表、挡位、模式和告警。
 - 用稳定的 RGB 呼吸/常亮/双闪区分运行、暂停、菜单、保存和故障。
-- 将 12 个模式的完整 tuning、Custom 配置、本地字段、CAN ID 和编码器 offset 保存到片内 Flash。
+- 将 13 个模式的完整 tuning、Custom 配置、本地字段、CAN ID 和编码器 offset 保存到片内 Flash。
 
 ## 快速入口
 
@@ -27,6 +27,7 @@
 | [外设与引脚](docs/peripherals.md) | TIM/ADC/SPI/I2C/FDCAN/GPIO/DMA 的用途 |
 | [控制链路](docs/control-loop.md) | FOC、电流环、速度环、位置环、电流模式、Dial 模式 |
 | [固件 SmartKnob](docs/smartknob-firmware.md) | 本地预设、运行配置、导航挡位、电流限制和 CAN 上位机接口 |
+| [无摩擦模式](docs/frictionless-mode.md) | 模式 12、零转矩控制、补偿参数和 ST-Link 实机测试 |
 | [通信协议](docs/communication-protocol.md) | I2C 寄存器表、CAN 命令、CAN-I2C 桥接 |
 | [显示与输入](docs/display-and-input.md) | 圆形仪表盘、本地菜单、长按/双击、参数范围和安全边界 |
 | [持久化配置](docs/persistence.md) | Flash 数据布局、编码器 offset 保存、读写时机、保护状态保存 |

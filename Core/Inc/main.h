@@ -49,7 +49,7 @@ extern "C" {
 
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
-#define FLASH_DATA_SIZE 512
+#define FLASH_DATA_SIZE 592
 
 #define MY_INT32_MAX 2100000000
 #define MY_INT32_MIN -2100000000

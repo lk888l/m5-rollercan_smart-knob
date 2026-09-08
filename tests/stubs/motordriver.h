@@ -5,6 +5,7 @@
 
 void MotorDriverSetCurrentReal(float phase_current_ma);
 void MotorDriverSetCurrentRealContinuous(float phase_current_ma);
+void MotorDriverSetTorqueCurrent(float phase_current_ma);
 uint8_t MotorDriverIsOutputEnabled(void);
 
 #endif

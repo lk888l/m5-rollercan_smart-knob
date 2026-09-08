@@ -16,6 +16,7 @@ uint8_t error_code;
 uint8_t over_vol_flag;
 float mechanical_rad;
 float motor_rps;
+float motor_rps_fast;
 float ph_crrent_lpf;
 
 static uint32_t fake_time_us;
@@ -37,6 +38,11 @@ void MotorDriverSetCurrentReal(float phase_current_ma)
 }
 
 void MotorDriverSetCurrentRealContinuous(float phase_current_ma)
+{
+    commanded_current_ma = phase_current_ma;
+}
+
+void MotorDriverSetTorqueCurrent(float phase_current_ma)
 {
     commanded_current_ma = phase_current_ma;
 }
@@ -287,6 +293,86 @@ static void test_snapshot_roundtrip_and_crc(void)
                  "an old 48-byte page must be detected as legacy");
 }
 
+static void put_test_u32(uint8_t *bytes, uint32_t value)
+{
+    for (unsigned i = 0; i < 4U; ++i) bytes[i] = (uint8_t)(value >> (8U * i));
+}
+
+static void test_v1_snapshot_migration_and_frictionless_parameters(void)
+{
+    const char *name = "v1_snapshot_migration_and_frictionless_parameters";
+    SmartKnobPersistentSnapshot source, decoded, defaults, live_after;
+    smart_knob_modes_reset_defaults();
+    (void)smart_knob_select_mode(SMART_KNOB_MODE_COARSE_WEAK);
+    (void)smart_knob_write_parameter(SMART_KNOB_FUNC_P_GAIN, 12345, 0x42);
+    (void)smart_knob_write_parameter(SMART_KNOB_FUNC_CUSTOM_LED_HUE, 231, 0x42);
+    (void)smart_knob_snapshot_export(&source);
+    (void)smart_knob_snapshot_defaults(&defaults);
+
+    /* Construct the previous on-flash format independently: twelve 8-int
+       records, then 14 custom values. Its padding is not part of the CRC. */
+    uint8_t old[512] = {0};
+    memcpy(&old[48], "SKN2", 4U);
+    old[52] = 1U; old[53] = 12U; old[54] = source.selected_mode;
+    old[56] = 0xB8U; old[57] = 1U;
+    size_t offset = 64U;
+    for (unsigned mode = 0; mode < 12U; ++mode) {
+        for (unsigned field = 0; field < 8U; ++field) {
+            put_test_u32(&old[offset], (uint32_t)source.mode_values[mode][field]);
+            offset += 4U;
+        }
+    }
+    for (unsigned field = 0; field < 14U; ++field) {
+        put_test_u32(&old[offset], (uint32_t)source.custom_values[field]);
+        offset += 4U;
+    }
+    uint8_t crc_input[452];
+    memcpy(crc_input, &old[48], 12U);
+    memcpy(&crc_input[12], &old[64], 440U);
+    put_test_u32(&old[60], smart_knob_persistence_crc32(crc_input, sizeof(crc_input)));
+    require_true(name, smart_knob_persistence_decode(old, sizeof(old), &decoded),
+        "the existing 512-byte v1 page must migrate");
+    for (unsigned mode = 0; mode < 12U; ++mode) {
+        require_true(name, memcmp(source.mode_values[mode], decoded.mode_values[mode], 32U) == 0,
+            "all old tuning values must survive migration exactly");
+        require_true(name, decoded.mode_values[mode][8] == 0,
+            "legacy modes must receive a zero viscous coefficient");
+    }
+    require_true(name, memcmp(source.custom_values, decoded.custom_values, sizeof(source.custom_values)) == 0,
+        "custom settings must survive migration exactly");
+    require_true(name, memcmp(defaults.mode_values[12], decoded.mode_values[12], sizeof(defaults.mode_values[12])) == 0,
+        "the new preset must receive its compiled defaults");
+    (void)smart_knob_snapshot_export(&live_after);
+    require_true(name, memcmp(&source, &live_after, sizeof(source)) == 0,
+        "decoding must not change live parameters or mode selection");
+    old[100] ^= 1U;
+    require_true(name, !smart_knob_persistence_decode(old, sizeof(old), &decoded),
+        "damaged old-format CRC must be rejected");
+
+    (void)smart_knob_select_mode(SMART_KNOB_MODE_FRICTIONLESS);
+    require_true(name, smart_knob_write_parameter(SMART_KNOB_FUNC_VISCOUS_FRICTION, 275, 0x42),
+        "new CAN coefficient must be writable");
+    int32_t coefficient;
+    require_true(name, smart_knob_read_parameter(SMART_KNOB_FUNC_VISCOUS_FRICTION, &coefficient) && coefficient == 275,
+        "viscous coefficient uses microamps per radian per second");
+    CanProtocolCommand command = write_command(SMART_KNOB_FUNC_VISCOUS_FRICTION, 275);
+    require_true(name, host_control_command_is_mutating(&command) && host_control_command_changes_snapshot(&command),
+        "new parameter must participate in host ownership and persistence transactions");
+    (void)smart_knob_snapshot_export(&source);
+    uint8_t current[SMART_KNOB_FLASH_TOTAL_SIZE];
+    memset(current, 0, sizeof(current));
+    require_true(name, smart_knob_persistence_encode(current, sizeof(current), &source) &&
+        smart_knob_persistence_decode(current, sizeof(current), &decoded) &&
+        smart_knob_snapshot_import(&decoded), "new preset and coefficient must round-trip through flash");
+    require_true(name, smart_knob_active_mode() == SMART_KNOB_MODE_FRICTIONLESS &&
+        smart_knob_read_parameter(SMART_KNOB_FUNC_VISCOUS_FRICTION, &coefficient) && coefficient == 275,
+        "restored mode and coefficient must match saved values");
+    for (size_t length = 0; length < sizeof(current); ++length) {
+        require_true(name, !smart_knob_persistence_decode(current, length, &decoded),
+            "all truncated v2 packages must be rejected");
+    }
+}
+
 static void test_legacy_migration_and_selective_local_edit(void)
 {
     static const char name[] = "legacy_migration_and_selective_local_edit";
@@ -401,7 +487,7 @@ static int32_t scaled(float value)
 static void test_frozen_host_preset_table(void)
 {
     static const char name[] = "frozen_host_preset_table";
-    static const FrozenPreset expected[SMART_KNOB_MODE_COUNT] = {
+    static const FrozenPreset expected[12] = {
         {0, 0, -1, 10000, 0, 1000, 550, 0, 120, 0, 0, 88, 0, 0},
         {0, 0, -1, 10000, 0, 1000, 750, 0, 200, 0, 0, 38, 20, 0},
         {0, 0, 10, 10000, 0, 1000, 1100, 0, 0, 0, 0, 63, 0, 0},
@@ -417,7 +503,7 @@ static void test_frozen_host_preset_table(void)
     };
 
     smart_knob_modes_reset_defaults();
-    for (uint8_t index = 0U; index < SMART_KNOB_MODE_COUNT; ++index) {
+    for (uint8_t index = 0U; index < 12U; ++index) {
         const SmartKnobModeConfig *mode = smart_knob_mode_get_default(index);
         const FrozenPreset *want = &expected[index];
         require_true(name, mode != NULL, "all twelve presets must exist");
@@ -454,6 +540,91 @@ static void test_frozen_host_preset_table(void)
                  "magnetic detent positions must match the host table");
 }
 
+static void test_frictionless_canonical_parameters(void)
+{
+    const char *name = "frictionless_canonical_parameters";
+    smart_knob_modes_reset_defaults();
+    require_true(name, smart_knob_select_mode(SMART_KNOB_MODE_FRICTIONLESS),
+        "FR-L must be selectable for protocol checks");
+    const struct { uint16_t parameter; int32_t requested; int32_t canonical; } cases[] = {
+        {SMART_KNOB_FUNC_P_GAIN, -1000, 0},
+        {SMART_KNOB_FUNC_P_GAIN, 80000, 8000},
+        {SMART_KNOB_FUNC_D_GAIN, 1, 5},
+        {SMART_KNOB_FUNC_D_GAIN, 1000, 200},
+        {SMART_KNOB_FUNC_D_GAIN, -1, 0},
+        {SMART_KNOB_FUNC_D_GAIN, 0, 0},
+        {SMART_KNOB_FUNC_CURRENT_LIMIT, -1, 0},
+        {SMART_KNOB_FUNC_CURRENT_LIMIT, 1200, 800},
+    };
+    SmartKnobPersistentSnapshot defaults, source, decoded;
+    require_true(name, smart_knob_snapshot_defaults(&defaults), "default snapshot must be available");
+    uint8_t bytes[SMART_KNOB_FLASH_TOTAL_SIZE] = {0};
+    for (unsigned i = 0U; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        int32_t value = INT32_MIN;
+        require_true(name, smart_knob_write_parameter(cases[i].parameter, cases[i].requested, 0x42) &&
+            smart_knob_read_parameter(cases[i].parameter, &value) && value == cases[i].canonical,
+            "CAN writes and immediate reads must use the effective FR-L range");
+        require_true(name, smart_knob_snapshot_export(&source) &&
+            smart_knob_persistence_encode(bytes, sizeof(bytes), &source) &&
+            smart_knob_persistence_decode(bytes, sizeof(bytes), &decoded) &&
+            smart_knob_snapshot_import(&decoded) &&
+            smart_knob_read_parameter(cases[i].parameter, &value) && value == cases[i].canonical,
+            "canonical values, including D zero's default-filter meaning, must survive flash round trips");
+        for (uint8_t mode = 0U; mode < SMART_KNOB_MODE_FRICTIONLESS; ++mode) {
+            require_true(name, memcmp(source.mode_values[mode], defaults.mode_values[mode],
+                                      sizeof(source.mode_values[mode])) == 0,
+                "FR-L canonicalization must not change any other preset");
+        }
+    }
+
+    /* Export and readback also defend against diagnostics or direct firmware
+       edits that have not yet passed through a control iteration. */
+    SmartKnobModeConfig *mode = smart_knob_mode_get_mutable(SMART_KNOB_MODE_FRICTIONLESS);
+    mode->tuning.p_gain = 80.0f;
+    mode->tuning.d_gain = 0.001f;
+    mode->tuning.current_limit_a = 1.2f;
+    int32_t value;
+    require_true(name, smart_knob_read_parameter(SMART_KNOB_FUNC_P_GAIN, &value) && value == 8000 &&
+        smart_knob_snapshot_export(&source) &&
+        source.mode_values[SMART_KNOB_MODE_FRICTIONLESS][1] == 8000 &&
+        source.mode_values[SMART_KNOB_MODE_FRICTIONLESS][2] == 5 &&
+        source.mode_values[SMART_KNOB_MODE_FRICTIONLESS][4] == 800,
+        "readback and export must never advertise ineffective raw FR-L values");
+
+    source.selected_mode = SMART_KNOB_MODE_COARSE_STRONG;
+    source.mode_values[SMART_KNOB_MODE_FRICTIONLESS][1] = 80000;
+    source.mode_values[SMART_KNOB_MODE_FRICTIONLESS][2] = 1;
+    source.mode_values[SMART_KNOB_MODE_FRICTIONLESS][4] = 1200;
+    source.mode_values[SMART_KNOB_MODE_COARSE_STRONG][1] = 80000;
+    source.mode_values[SMART_KNOB_MODE_COARSE_STRONG][2] = 1000;
+    source.mode_values[SMART_KNOB_MODE_COARSE_STRONG][4] = 1200;
+    require_true(name, smart_knob_snapshot_import(&source), "legacy-range snapshot must load");
+    mode = smart_knob_mode_get_mutable(SMART_KNOB_MODE_FRICTIONLESS);
+    require_true(name, mode->tuning.p_gain == 8.0f &&
+        fabsf(mode->tuning.d_gain - 0.005f) < 1e-7f &&
+        fabsf(mode->tuning.current_limit_a - 0.8f) < 1e-7f,
+        "snapshot import must canonicalize FR-L even when a different mode is selected");
+    require_true(name, smart_knob_read_parameter(SMART_KNOB_FUNC_P_GAIN, &value) && value == 80000 &&
+        smart_knob_read_parameter(SMART_KNOB_FUNC_D_GAIN, &value) && value == 1000 &&
+        smart_knob_read_parameter(SMART_KNOB_FUNC_CURRENT_LIMIT, &value) && value == 1200,
+        "legacy modes must keep their original P, D and 1200 mA protocol ranges");
+    require_true(name, smart_knob_write_parameter(SMART_KNOB_FUNC_P_GAIN, 12000, 0x42) &&
+        smart_knob_read_parameter(SMART_KNOB_FUNC_P_GAIN, &value) && value == 12000 &&
+        smart_knob_write_parameter(SMART_KNOB_FUNC_D_GAIN, 1, 0x42) &&
+        smart_knob_read_parameter(SMART_KNOB_FUNC_D_GAIN, &value) && value == 1,
+        "FR-L limits must not leak into live writes to another mode");
+
+    require_true(name, smart_knob_select_mode(SMART_KNOB_MODE_FRICTIONLESS), "return to FR-L");
+    mode->tuning.p_gain = INFINITY;
+    mode->tuning.d_gain = NAN;
+    mode->tuning.current_limit_a = INFINITY;
+    require_true(name, smart_knob_snapshot_export(&source) &&
+        source.mode_values[SMART_KNOB_MODE_FRICTIONLESS][1] == 0 &&
+        source.mode_values[SMART_KNOB_MODE_FRICTIONLESS][2] == 0 &&
+        source.mode_values[SMART_KNOB_MODE_FRICTIONLESS][4] == 0,
+        "non-finite direct tuning must export finite inactive/default requests");
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) {
@@ -468,10 +639,14 @@ int main(int argc, char **argv)
         test_partial_transaction_is_not_committed();
     } else if (strcmp(argv[1], "snapshot-crc") == 0) {
         test_snapshot_roundtrip_and_crc();
+    } else if (strcmp(argv[1], "v1-frictionless") == 0) {
+        test_v1_snapshot_migration_and_frictionless_parameters();
     } else if (strcmp(argv[1], "legacy-selective") == 0) {
         test_legacy_migration_and_selective_local_edit();
     } else if (strcmp(argv[1], "preset-table") == 0) {
         test_frozen_host_preset_table();
+    } else if (strcmp(argv[1], "frictionless-canonical") == 0) {
+        test_frictionless_canonical_parameters();
     } else {
         fprintf(stderr, "unknown test case: %s\n", argv[1]);
         return EXIT_FAILURE;

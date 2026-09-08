@@ -11,6 +11,7 @@ struct CommandStorage {
     volatile float iq_target_adc;
     volatile uint32_t mode_generation;
     volatile uint8_t driver_mode;
+    volatile uint8_t track_zero_current;
 };
 
 struct SensorStorage {
@@ -41,6 +42,7 @@ extern "C" void FastControlLinkInit(void)
     command_storage.iq_target_adc = 0.0f;
     command_storage.mode_generation = 0U;
     command_storage.driver_mode = 0U;
+    command_storage.track_zero_current = 0U;
     sensor_storage.sequence = 0U;
     sensor_storage.encoder_raw = 0U;
     sensor_storage.mechanical_angle_tenths = 0U;
@@ -52,7 +54,7 @@ extern "C" void FastControlLinkInit(void)
     __DMB();
 }
 
-extern "C" void FastControlPublishCurrentAdc(float iq_target_adc)
+static void PublishCurrent(float iq_target_adc, uint8_t track_zero_current)
 {
     const uint32_t primask = __get_PRIMASK();
     __disable_irq();
@@ -61,12 +63,23 @@ extern "C" void FastControlPublishCurrentAdc(float iq_target_adc)
     command_storage.sequence = next_sequence - 1U;
     __DMB();
     command_storage.iq_target_adc = iq_target_adc;
+    command_storage.track_zero_current = track_zero_current;
     __DMB();
     command_storage.sequence = next_sequence;
 
     if (primask == 0U) {
         __enable_irq();
     }
+}
+
+extern "C" void FastControlPublishCurrentAdc(float iq_target_adc)
+{
+    PublishCurrent(iq_target_adc, 0U);
+}
+
+extern "C" void FastControlPublishTorqueCurrentAdc(float iq_target_adc)
+{
+    PublishCurrent(iq_target_adc, 1U);
 }
 
 extern "C" void FastControlPublishDriverMode(uint8_t driver_mode)
@@ -99,6 +112,7 @@ extern "C" bool FastControlConsumeCommandFromISR(FastControlCommandSnapshot *com
     const float target = command_storage.iq_target_adc;
     const uint32_t mode_generation = command_storage.mode_generation;
     const uint8_t driver_mode = command_storage.driver_mode;
+    const uint8_t track_zero_current = command_storage.track_zero_current;
     __DMB();
     if (sequence_before != command_storage.sequence) {
         return false;
@@ -109,9 +123,9 @@ extern "C" bool FastControlConsumeCommandFromISR(FastControlCommandSnapshot *com
     command->iq_target_adc = target;
     command->mode_generation = mode_generation;
     command->driver_mode = driver_mode;
+    command->track_zero_current = track_zero_current;
     command->reserved[0] = 0U;
     command->reserved[1] = 0U;
-    command->reserved[2] = 0U;
     ++fast_control_command_apply_count;
     return true;
 }

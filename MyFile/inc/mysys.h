@@ -40,6 +40,7 @@ extern volatile uint32_t usart_tx_delay;
 extern float ph_current_rt,ph_crrent_lpf;
 extern float motor_rpm;
 extern float motor_rps;
+extern float motor_rps_fast;
 extern float speed_pid_float[3];
 extern float pos_pid_float[3];
 extern uint32_t speed_pid_low_int[3];

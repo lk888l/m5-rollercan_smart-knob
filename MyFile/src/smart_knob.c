@@ -13,6 +13,7 @@
 #include "motordriver.h"
 #include "mysys.h"
 #include "smart_knob_modes.h"
+#include "frictionless_calibration.h"
 
 #define SMART_KNOB_DEAD_ZONE_DETENT_PERCENT 0.2f
 #define SMART_KNOB_DEAD_ZONE_RAD DEG_TO_RAD(1.0f)
@@ -39,6 +40,15 @@
 #define SMART_KNOB_TELEMETRY_MAX_RATE_HZ 100U
 #define SMART_KNOB_TELEMETRY_DEFAULT_ENABLED 1U
 #define SMART_KNOB_SCALE 1000.0f
+#define SMART_KNOB_FRICTIONLESS_START_RAD_S 0.6f
+#define SMART_KNOB_FRICTIONLESS_STOP_RAD_S 0.2f
+#define SMART_KNOB_FRICTIONLESS_FULL_RAD_S 0.6f
+#define SMART_KNOB_FRICTIONLESS_ARM_MS 5U
+#define SMART_KNOB_FRICTIONLESS_REARM_MS 40U
+#define SMART_KNOB_FRICTIONLESS_SLEW_A_S 1.0f
+#define SMART_KNOB_FRICTIONLESS_LIMIT_A (SMART_KNOB_FRICTIONLESS_CURRENT_LIMIT_MA / 1000.0f)
+#define SMART_KNOB_FRICTIONLESS_NOMINAL_INERTIA_A_S2_RAD 0.000135f
+#define SMART_KNOB_FRICTIONLESS_INERTIA_LIMIT_A 0.040f
 #define DEG_TO_RAD(deg) ((deg) * PI / 180.0f)
 #define RAD_TO_DEG(rad) ((rad) * 180.0f / PI)
 
@@ -63,6 +73,23 @@ static float idle_velocity_alpha = SMART_KNOB_IDLE_VELOCITY_ALPHA_BASE;
 static float idle_correction_alpha = SMART_KNOB_IDLE_CORRECTION_ALPHA_BASE;
 static bool out_of_bounds;
 static float last_command_current_ma;
+static float frictionless_current_a;
+static float frictionless_ripple_blend;
+static float frictionless_inertia_velocity;
+static bool frictionless_inertia_initialized;
+#ifdef ROLLERCAN_MOTOR_DIAGNOSTICS
+static float frictionless_cogging_scale = 1.0f;
+void smart_knob_set_test_cogging_scale(float scale)
+{
+    frictionless_cogging_scale = isfinite(scale) ? fmaxf(0.0f, fminf(scale, 2.0f)) : 1.0f;
+}
+#else
+static const float frictionless_cogging_scale = 1.0f;
+#endif
+static int8_t frictionless_direction;
+static uint32_t frictionless_started_ms;
+static uint32_t frictionless_rearm_after_ms;
+static bool frictionless_armed;
 
 static int32_t previous_click_position;
 static uint32_t click_started_ms;
@@ -147,10 +174,11 @@ static int32_t position_count(const PB_SmartKnobConfig *config)
     return (int32_t)count;
 }
 
-static void sanitize_mode(SmartKnobModeConfig *mode)
+static void sanitize_mode(uint8_t mode_index, SmartKnobModeConfig *mode)
 {
     PB_SmartKnobConfig *config = &mode->config;
     SmartKnobTuning *tuning = &mode->tuning;
+    smart_knob_mode_normalize_tuning(mode_index, tuning);
 
     if (!isfinite(config->position_width_radians) || config->position_width_radians < 0.001f) {
         config->position_width_radians = DEG_TO_RAD(1.0f);
@@ -179,6 +207,8 @@ static void sanitize_mode(SmartKnobModeConfig *mode)
     }
     tuning->friction_current_a = fmaxf(0.0f, tuning->friction_current_a);
     tuning->click_current_a = fmaxf(0.0f, tuning->click_current_a);
+    tuning->viscous_friction_a_per_rad_s = isfinite(tuning->viscous_friction_a_per_rad_s)
+        ? clampf(tuning->viscous_friction_a_per_rad_s, 0.0f, 0.01f) : 0.0f;
 }
 
 static SmartKnobModeConfig *active_mode_mutable(void)
@@ -197,13 +227,25 @@ static void reset_click(void)
     click_running = false;
 }
 
+static void reset_frictionless(void)
+{
+    frictionless_current_a = 0.0f;
+    frictionless_ripple_blend = 0.0f;
+    frictionless_direction = 0;
+    frictionless_started_ms = 0U;
+    frictionless_rearm_after_ms = 0U;
+    frictionless_armed = false;
+    frictionless_inertia_velocity = 0.0f;
+    frictionless_inertia_initialized = false;
+}
+
 static void reanchor_active_mode(bool reset_position)
 {
     SmartKnobModeConfig *mode = active_mode_mutable();
     if (mode == NULL) {
         return;
     }
-    sanitize_mode(mode);
+    sanitize_mode(active_mode, mode);
     if (reset_position) {
         current_position = mode->config.position;
     }
@@ -219,6 +261,7 @@ static void reanchor_active_mode(bool reset_position)
     idle_start_ms = 0U;
     out_of_bounds = false;
     reset_click();
+    reset_frictionless();
 }
 
 static float stable_position(void)
@@ -231,14 +274,26 @@ static float stable_position(void)
     if (sample_time_s <= 0.0f || sample_time_s > 0.020f) {
         sample_time_s = 0.001f;
     }
-    const float max_delta_rad = fmaxf(SMART_KNOB_MIN_SAMPLE_STEP_RAD,
-                                      SMART_KNOB_MAX_SAMPLE_SPEED_RAD_S * sample_time_s);
+    float checked_delta_rad = raw_delta_rad;
+    float max_delta_rad = fmaxf(SMART_KNOB_MIN_SAMPLE_STEP_RAD,
+                               SMART_KNOB_MAX_SAMPLE_SPEED_RAD_S * sample_time_s);
+    if (active_mode == SMART_KNOB_MODE_FRICTIONLESS) {
+        /* Check disagreement with the fast encoder velocity, not absolute
+           speed. A fixed 80 rad/s envelope would silently disable free spin.
+           Allow quantization and velocity-filter lag while rejecting jumps. */
+        const float expected_delta_rad = motor_rps_fast * sample_time_s;
+        checked_delta_rad -= expected_delta_rad;
+        max_delta_rad = SMART_KNOB_MIN_SAMPLE_STEP_RAD +
+                        0.25f * fabsf(expected_delta_rad);
+    }
     last_sample_us = now_us;
     /* Always advance the raw baseline. Otherwise one rejected high-speed or
        encoder-glitch sample makes every later sample compare against a stale
        position and permanently disables haptics. */
-    last_raw_position_rad = raw_position_rad;
-    if (fabsf(raw_delta_rad) <= max_delta_rad) {
+    if (isfinite(raw_position_rad)) {
+        last_raw_position_rad = raw_position_rad;
+    }
+    if (isfinite(checked_delta_rad) && fabsf(checked_delta_rad) <= max_delta_rad) {
         if (sample_recovery_pending) {
             if (++sample_recovery_count >= SMART_KNOB_SAMPLE_RECOVERY_COUNT) {
                 /* Drop filter history accumulated before the discontinuity,
@@ -265,6 +320,10 @@ static float stable_position(void)
 
 static void update_high_speed_state(float velocity_rad_s)
 {
+    if (active_mode == SMART_KNOB_MODE_FRICTIONLESS) {
+        high_speed_active = false;
+        return;
+    }
     const float speed_rad_s = fabsf(velocity_rad_s);
     if (high_speed_active) {
         if (speed_rad_s <= SMART_KNOB_HAPTIC_RESUME_SPEED_RAD_S) {
@@ -315,6 +374,110 @@ static float friction_current(float velocity_rad_s, float compensation_a)
                               (SMART_KNOB_IDLE_VELOCITY_RAD_S * 10.0f)) /
                         (PI * 0.5f);
     return compensation_a * copysignf(taper, velocity_rad_s);
+}
+
+static float frictionless_inertia_current(const SmartKnobTuning *tuning,
+                                         float velocity, float dt)
+{
+    /* FR-L repurposes P as extra nominal rotor inertias and D as the
+       acceleration filter time in seconds. There is no stored speed target:
+       this velocity memory follows every hand-selected constant speed. */
+    const float multiplier = isfinite(tuning->p_gain)
+        ? clampf(tuning->p_gain, 0.0f, 8.0f) : 0.0f;
+    if (multiplier == 0.0f) {
+        frictionless_inertia_initialized = false;
+        return 0.0f;
+    }
+    if (!frictionless_inertia_initialized) {
+        frictionless_inertia_velocity = velocity;
+        frictionless_inertia_initialized = true;
+        return 0.0f;
+    }
+    const float tau = isfinite(tuning->d_gain) && tuning->d_gain > 0.0f
+        ? clampf(tuning->d_gain, 0.005f, 0.2f) : 0.020f;
+    /* Differentiate a low-pass velocity, rather than quantized 1 ms samples.
+       Updating this during observation preserves the diagnostic handover. */
+    const float acceleration = (velocity - frictionless_inertia_velocity) / (tau + dt);
+    frictionless_inertia_velocity += dt * acceleration;
+    return clampf(-SMART_KNOB_FRICTIONLESS_NOMINAL_INERTIA_A_S2_RAD *
+                  multiplier * acceleration,
+                  -SMART_KNOB_FRICTIONLESS_INERTIA_LIMIT_A,
+                  SMART_KNOB_FRICTIONLESS_INERTIA_LIMIT_A);
+}
+
+static float frictionless_current(const SmartKnobTuning *tuning,
+                                  float velocity, uint32_t now_ms, float dt)
+{
+    const float speed = fabsf(velocity);
+    const int8_t direction = velocity > 0.0f ? 1 : -1;
+    if (speed <= SMART_KNOB_FRICTIONLESS_STOP_RAD_S) {
+        if (frictionless_direction != 0) {
+            frictionless_rearm_after_ms = now_ms + SMART_KNOB_FRICTIONLESS_REARM_MS;
+        }
+        frictionless_current_a = 0.0f;
+        frictionless_ripple_blend = 0.0f;
+        frictionless_direction = 0;
+        frictionless_armed = false;
+        frictionless_inertia_initialized = false;
+        return 0.0f;
+    }
+    if (direction != frictionless_direction) {
+        if (frictionless_direction != 0) {
+            frictionless_rearm_after_ms = now_ms + SMART_KNOB_FRICTIONLESS_REARM_MS;
+        }
+        frictionless_current_a = 0.0f;
+        frictionless_ripple_blend = 0.0f;
+        frictionless_armed = false;
+        frictionless_inertia_initialized = false;
+        frictionless_direction = direction;
+        frictionless_started_ms = now_ms;
+    }
+    /* Do not pump energy into the first rebound from a cogging well or from
+       a hand stopping the shaft. Intentional reversal re-arms after 40 ms. */
+    if ((int32_t)(now_ms - frictionless_rearm_after_ms) < 0) {
+        return 0.0f;
+    }
+    if (!frictionless_armed) {
+        if (speed < SMART_KNOB_FRICTIONLESS_START_RAD_S) {
+            frictionless_started_ms = now_ms;
+            return 0.0f;
+        }
+        if ((uint32_t)(now_ms - frictionless_started_ms) < SMART_KNOB_FRICTIONLESS_ARM_MS) {
+            return 0.0f;
+        }
+        frictionless_armed = true;
+    }
+    /* Feed forward the estimated bearing/viscous loss. No velocity target or
+       integrator: a hand can slow, stop or reverse the shaft at any time. */
+    const float blend = clampf((speed - SMART_KNOB_FRICTIONLESS_STOP_RAD_S) /
+        (SMART_KNOB_FRICTIONLESS_FULL_RAD_S - SMART_KNOB_FRICTIONLESS_STOP_RAD_S),
+        0.0f, 1.0f);
+    const float taper = blend * blend * (3.0f - 2.0f * blend);
+    /* Low-speed sweeps require more loss compensation than the 12..30 rad/s
+       linear fit. A smooth Stribeck-shaped shoulder vanishes at normal speeds
+       and remains proportional to the user's running-friction setting. */
+    const float low_speed_loss = tuning->friction_current_a * 0.30f *
+        expf(-speed * speed / 9.0f);
+    const float amplitude = tuning->current_scale_a * taper *
+        (tuning->friction_current_a + low_speed_loss + tuning->viscous_friction_a_per_rad_s * speed);
+    const float target = (float)direction * fminf(amplitude, SMART_KNOB_FRICTIONLESS_LIMIT_A);
+    const float max_step = SMART_KNOB_FRICTIONLESS_SLEW_A_S * dt;
+    frictionless_current_a += clampf(target - frictionless_current_a, -max_step, max_step);
+    /* Identified from bidirectional driven sweeps on this module. The spatial
+       disturbance has the same sign at a given shaft angle in either direction.
+       Ramp its envelope on entry; its periodic component must follow angle
+       without the mean-current slew limiter introducing a speed-dependent lag. */
+    frictionless_ripple_blend = fminf(1.0f, frictionless_ripple_blend + dt / 0.05f);
+    const float ripple_a = frictionless_angle_current_a(mechanical_rad);
+    /* Preserve the relative calibration when an extreme user gain saturates
+       the mean term. Clipping only the mean would let the ripple dominate it. */
+    const float ripple_limit_scale = amplitude > 1e-6f
+        ? fminf(1.0f, fabsf(frictionless_current_a) / amplitude) : 0.0f;
+    const float inertia_a = frictionless_inertia_current(tuning, velocity, dt);
+    return clampf(frictionless_current_a + tuning->current_scale_a * taper *
+                  frictionless_ripple_blend * frictionless_cogging_scale * ripple_limit_scale * ripple_a +
+                  inertia_a,
+                  -SMART_KNOB_FRICTIONLESS_LIMIT_A, SMART_KNOB_FRICTIONLESS_LIMIT_A);
 }
 
 static float click_current(const SmartKnobTuning *tuning, bool click_allowed, uint32_t now_ms)
@@ -397,7 +560,7 @@ void init_smart_knob(void)
     sample_valid = true;
     sample_recovery_pending = false;
     sample_recovery_count = 0U;
-    high_speed_active =
+    high_speed_active = active_mode != SMART_KNOB_MODE_FRICTIONLESS &&
         fabsf(motor_rps) > SMART_KNOB_HAPTIC_RESUME_SPEED_RAD_S;
     last_command_current_ma = 0.0f;
 
@@ -420,22 +583,28 @@ void smart_knob_set_update_rate(float update_rate_hz)
         powf(1.0f - SMART_KNOB_IDLE_CORRECTION_ALPHA_BASE, period_ratio);
 }
 
-void handle_smart_knob(void)
+static void smart_knob_step(bool apply_output)
 {
     SmartKnobModeConfig *mode = active_mode_mutable();
     if (mode == NULL) {
-        MotorDriverSetCurrentRealContinuous(0.0f);
+        if (apply_output) MotorDriverSetCurrentRealContinuous(0.0f);
         return;
     }
-    sanitize_mode(mode);
+    sanitize_mode(active_mode, mode);
 
     const uint32_t now_ms = HAL_GetTick();
+    const uint32_t elapsed_us = micros() - last_sample_us;
     const float knob_position_rad = stable_position();
-    const float velocity_rad_s = motor_rps;
+    const bool is_frictionless = active_mode == SMART_KNOB_MODE_FRICTIONLESS;
+    const float velocity_rad_s = is_frictionless ? motor_rps_fast : motor_rps;
     update_high_speed_state(velocity_rad_s);
-    if (!sample_valid || (int32_t)(now_ms - enable_after_ms) < 0) {
+    if (!sample_valid || !isfinite(velocity_rad_s) ||
+        (int32_t)(now_ms - enable_after_ms) < 0 ||
+        (is_frictionless && (elapsed_us == 0U || elapsed_us > 20000U ||
+                            !MotorDriverIsOutputEnabled() || error_code != 0U || over_vol_flag != 0U))) {
+        reset_frictionless();
         last_command_current_ma = 0.0f;
-        MotorDriverSetCurrentRealContinuous(0.0f);
+        if (apply_output) MotorDriverSetCurrentRealContinuous(0.0f);
         publish_runtime_state(velocity_rad_s);
         return;
     }
@@ -448,7 +617,7 @@ void handle_smart_knob(void)
        unbounded knob. A bounded mode owns an absolute detent lattice; moving
        that lattice toward a hand-held offset turns a static spring into a
        slow state machine and can create a relaxation oscillation. */
-    if (num_positions <= 0) {
+    if (num_positions <= 0 && !is_frictionless) {
         idle_velocity_ewma = fabsf(velocity_rad_s) * idle_velocity_alpha +
                              idle_velocity_ewma * (1.0f - idle_velocity_alpha);
         if (idle_velocity_ewma > SMART_KNOB_IDLE_VELOCITY_RAD_S) {
@@ -518,6 +687,10 @@ void handle_smart_knob(void)
         !out_of_bounds && config->detent_positions_count == 0U,
         now_ms);
     requested_current_a += friction_request_a + click_request_a;
+    if (is_frictionless) {
+        requested_current_a = frictionless_current(tuning, velocity_rad_s, now_ms,
+                                                   (float)elapsed_us * 1e-6f);
+    }
 
     /* Quantized encoder speed can leave a tiny D request while the shaft is
        physically stationary. Quiet the electrical loop from control intent:
@@ -538,15 +711,40 @@ void handle_smart_knob(void)
         requested_current_a = clampf(requested_current_a,
                                      -current_limit_a,
                                      current_limit_a);
-        if (num_positions == 1) {
+        if (num_positions == 1 && !is_frictionless) {
             requested_current_a = derate_accelerating_current(requested_current_a,
                                                               velocity_rad_s);
         }
     }
     last_command_current_ma = requested_current_a * 1000.0f;
-    MotorDriverSetCurrentRealContinuous(last_command_current_ma);
+    if (!apply_output) {
+        publish_runtime_state(velocity_rad_s);
+        return;
+    }
+    if (is_frictionless) {
+        /* Zero PWM voltage shorts the winding and brakes even a slow hand
+           motion. Normal FR-L keeps regulating Iq=0 below the assist threshold;
+           faults, disabled output and invalid samples still exit above. */
+        MotorDriverSetTorqueCurrent(last_command_current_ma);
+    } else {
+        MotorDriverSetCurrentRealContinuous(last_command_current_ma);
+    }
     publish_runtime_state(velocity_rad_s);
 }
+
+void handle_smart_knob(void)
+{
+    smart_knob_step(true);
+}
+
+#ifdef ROLLERCAN_MOTOR_DIAGNOSTICS
+void smart_knob_observe_motion(void)
+{
+    /* Prime normal haptic state while the diagnostic emulates a hand driving
+       the shaft. The diagnostic publishes the sole actuator command. */
+    smart_knob_step(false);
+}
+#endif
 
 bool smart_knob_select_mode(uint8_t mode_index)
 {
@@ -558,7 +756,10 @@ bool smart_knob_select_mode(uint8_t mode_index)
         init_smart_knob();
     } else {
         reanchor_active_mode(true);
-        publish_runtime_state(motor_rps);
+        const float velocity = active_mode == SMART_KNOB_MODE_FRICTIONLESS
+                                   ? motor_rps_fast : motor_rps;
+        update_high_speed_state(velocity);
+        publish_runtime_state(velocity);
     }
     return true;
 }
@@ -570,6 +771,7 @@ void smart_knob_enter_navigation_mode(void)
         init_smart_knob();
     } else {
         reanchor_active_mode(true);
+        update_high_speed_state(motor_rps);
         publish_runtime_state(motor_rps);
     }
 }
@@ -607,6 +809,8 @@ bool smart_knob_read_parameter(uint16_t index, int32_t *value)
     if (value == NULL || mode == NULL || custom == NULL) {
         return false;
     }
+    SmartKnobTuning tuning = mode->tuning;
+    smart_knob_mode_normalize_tuning(active_mode, &tuning);
 
     switch (index) {
     case SMART_KNOB_FUNC_MODE: *value = active_mode; break;
@@ -615,13 +819,15 @@ bool smart_knob_read_parameter(uint16_t index, int32_t *value)
     case SMART_KNOB_FUNC_TELEMETRY_HOST_ID: *value = telemetry_host_id; break;
     case SMART_KNOB_FUNC_MODE_COUNT: *value = smart_knob_modes_count(); break;
     case SMART_KNOB_FUNC_PROTOCOL_VERSION: *value = SMART_KNOB_TELEMETRY_PROTOCOL_VERSION; break;
-    case SMART_KNOB_FUNC_P_GAIN: *value = scaled_to_i32(mode->tuning.p_gain); break;
-    case SMART_KNOB_FUNC_D_GAIN: *value = scaled_to_i32(mode->tuning.d_gain); break;
+    case SMART_KNOB_FUNC_P_GAIN: *value = scaled_to_i32(tuning.p_gain); break;
+    case SMART_KNOB_FUNC_D_GAIN: *value = scaled_to_i32(tuning.d_gain); break;
     case SMART_KNOB_FUNC_CURRENT_SCALE: *value = scaled_to_i32(mode->tuning.current_scale_a); break;
-    case SMART_KNOB_FUNC_CURRENT_LIMIT: *value = scaled_to_i32(mode->tuning.current_limit_a); break;
+    case SMART_KNOB_FUNC_CURRENT_LIMIT: *value = scaled_to_i32(tuning.current_limit_a); break;
     case SMART_KNOB_FUNC_MAX_CURRENT_PERMILLE: *value = mode->tuning.max_current_permille; break;
     case SMART_KNOB_FUNC_FRICTION_CURRENT: *value = scaled_to_i32(mode->tuning.friction_current_a); break;
     case SMART_KNOB_FUNC_CLICK_CURRENT: *value = scaled_to_i32(mode->tuning.click_current_a); break;
+    case SMART_KNOB_FUNC_VISCOUS_FRICTION:
+        *value = scaled_to_i32(mode->tuning.viscous_friction_a_per_rad_s * 1000.0f); break;
     case SMART_KNOB_FUNC_CUSTOM_POSITION: *value = custom->config.position; break;
     case SMART_KNOB_FUNC_CUSTOM_MIN_POSITION: *value = custom->config.min_position; break;
     case SMART_KNOB_FUNC_CUSTOM_MAX_POSITION: *value = custom->config.max_position; break;
@@ -718,6 +924,8 @@ bool smart_knob_write_parameter(uint16_t index, int32_t value, uint8_t host_id)
         mode->tuning.max_current_permille = (uint16_t)clamp_i32(value, 0, 1000); break;
     case SMART_KNOB_FUNC_FRICTION_CURRENT: mode->tuning.friction_current_a = scaled; break;
     case SMART_KNOB_FUNC_CLICK_CURRENT: mode->tuning.click_current_a = scaled; break;
+    case SMART_KNOB_FUNC_VISCOUS_FRICTION:
+        mode->tuning.viscous_friction_a_per_rad_s = (float)value / 1000000.0f; break;
     case SMART_KNOB_FUNC_CUSTOM_POSITION: custom->config.position = value; break;
     case SMART_KNOB_FUNC_CUSTOM_MIN_POSITION: custom->config.min_position = value; break;
     case SMART_KNOB_FUNC_CUSTOM_MAX_POSITION: custom->config.max_position = value; break;
@@ -739,8 +947,8 @@ bool smart_knob_write_parameter(uint16_t index, int32_t value, uint8_t host_id)
         return false;
     }
 
-    sanitize_mode(mode);
-    sanitize_mode(custom);
+    sanitize_mode(active_mode, mode);
+    sanitize_mode(SMART_KNOB_MODE_CUSTOM, custom);
     update_custom_runtime_after_write(index, previous_width, previous_position);
     publish_runtime_state(motor_rps);
     return true;
