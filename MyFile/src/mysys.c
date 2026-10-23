@@ -16,6 +16,7 @@
 #include "oled_u8g2.h"
 #include "u8g2_disp_fun.h"
 #include "encoder.h"
+#include "motion_estimator.h"
 #include "ws2812.h"
 #include "i2c.h"
 #include "i2c_ex.h"
@@ -214,6 +215,8 @@ static float speed_filter_alpha =
 static float encoder_counts_to_rpm = 60.0f * LEGACY_CONTROL_RATE_HZ;
 static float encoder_counts_to_rps = 2.0f * PI * LEGACY_CONTROL_RATE_HZ;
 static FastSensorSnapshot control_sensor_snapshot;
+static MotionEstimator motor_motion;
+static uint32_t motion_sensor_sequence = UINT32_MAX;
 static volatile uint8_t fast_cycle_pending = 0U;
 static uint32_t fast_cycle_start_cycles = 0U;
 static uint32_t fast_cycle_start_active_cycles = 0U;
@@ -771,7 +774,9 @@ static void rebase_encoder_after_calibration(void)
   uint32_t primask = __get_PRIMASK();
 
   __disable_irq();
-  single_turn_angle = MotorDriverGetMechanicalAngle() / 10.0f;
+  motion_estimator_reset(&motor_motion, MotorDriverGetEncoderRaw(), micros());
+  single_turn_angle = motion_estimator_position_rad(&motor_motion) * (180.0f / PI);
+  motion_sensor_sequence = UINT32_MAX;
   encoder_reset_tracking();
   speed_encoder_update();
   speed_encoder_value_t.last_encoder_value = speed_encoder_value_t.encoder_value;
@@ -781,7 +786,7 @@ static void rebase_encoder_after_calibration(void)
   mechanical_turns = 0.0f;
   last_mechanical_turns = 0.0f;
   mechanical_angle = single_turn_angle;
-  mechanical_rad = single_turn_angle * PI / 180.0f;
+  mechanical_rad = motion_estimator_position_rad(&motor_motion);
   diff_encoder_value = 0;
   diff_encoder_value_lpf = 0.0f;
   rpm_rps_count_temp = 0.0f;
@@ -1124,6 +1129,8 @@ uint8_t crc8_MAXIM(uint8_t *data, uint8_t len)
 void InitMysys(void)
 {
 
+  motor_motion = (MotionEstimator){0};
+  motion_sensor_sequence = UINT32_MAX;
   encoder_absolute_angle_new=0;
   encoder_absolute_angle_old=0;
   mechanical_angle=0;
@@ -1330,24 +1337,17 @@ void Loop_Control(void)
   FastSensorSnapshot latest_sensor_snapshot;
   if (FastSensorRead(&latest_sensor_snapshot)) {
     control_sensor_snapshot = latest_sensor_snapshot;
+    if (latest_sensor_snapshot.sequence != motion_sensor_sequence &&
+        motion_estimator_update(&motor_motion, latest_sensor_snapshot.encoder_raw, micros())) {
+      motion_sensor_sequence = latest_sensor_snapshot.sequence;
+      encoder_absolute_angle_old = encoder_absolute_angle_new;
+      encoder_absolute_angle_new = (float)motor_motion.previous_count * (360.0f / 16384.0f);
+      mechanical_turns = (float)motion_estimator_turns(&motor_motion);
+      mechanical_rad = motion_estimator_position_rad(&motor_motion);
+      mechanical_angle = mechanical_rad * (180.0f / PI);
+      motor_rps_fast = motion_estimator_velocity_rad_s(&motor_motion);
+    }
   }
-
-  encoder_absolute_angle_old = encoder_absolute_angle_new;
-  encoder_absolute_angle_new = control_sensor_snapshot.mechanical_angle_tenths/10.0f;
-
-  if(encoder_absolute_angle_new<90.0f && encoder_absolute_angle_old>180.0f )
-  {
-    mechanical_turns += 1.0f;
-  }
-
-  if(encoder_absolute_angle_new>180.0f && encoder_absolute_angle_old<90.0f )
-  {
-    mechanical_turns -= 1.0f;
-  }
-
-    mechanical_angle =  (360.0f * mechanical_turns) + encoder_absolute_angle_new;
-
-    mechanical_rad =  mechanical_angle * PI / 180.0f;
 
     //lpfdata += (1.0 / (1.0 + 1.0/(2.0f * 3.14f *T*fc)))*(rawdata - lpfdata );
     //lpfdata ： 滤波后的数据。
@@ -1366,12 +1366,8 @@ void Loop_Control(void)
     rpm_rps_count_temp = diff_encoder_value_lpf / 16383.0f;
     motor_rpm = rpm_rps_count_temp * encoder_counts_to_rpm;
     motor_rps = rpm_rps_count_temp * encoder_counts_to_rps;
-    /* Low-latency full-resolution velocity for friction compensation. The
-       existing 2 Hz estimate remains unchanged for legacy PID modes. */
-    const float fast_alpha = 1.0f / (1.0f + 0.008f *
-        (encoder_counts_to_rps / (2.0f * PI)));
-    motor_rps_fast += fast_alpha *
-        ((float)diff_encoder_value * encoder_counts_to_rps / 16384.0f - motor_rps_fast);
+    /* Legacy speed PID/display retain their 2 Hz estimate. Haptics use the
+       independent full-resolution, elapsed-time estimator above. */
     speed_encoder_value_t.last_encoder_value = speed_encoder_value_t.encoder_value;  
 
     //get input voltage

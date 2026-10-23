@@ -45,7 +45,7 @@ if (!Number.isInteger(options.mode) || !(options.mode <= 12 || options.mode >= 0
     !Number.isInteger(options.dense) || options.dense < 0 || options.dense > 1 ||
     !Number.isFinite(options.inertia_gain) || (options.inertia_gain !== -1 && (options.inertia_gain < 0 || options.inertia_gain > 8)) ||
     !Number.isFinite(options.inertia_tau_ms) || (options.inertia_tau_ms !== -1 && (options.inertia_tau_ms < 5 || options.inertia_tau_ms > 200)) ||
-    (options.dense === 1 && (options.pulse_velocity_rad_s === 0 || options.pulse_ms === 0)) ||
+    (options.dense === 1 && options.pulse_ms === 0) ||
     !Number.isFinite(options.compensation_scale) || options.compensation_scale < -1 || options.compensation_scale > 10 ||
     !Number.isFinite(options.cogging_scale) || options.cogging_scale < 0 || options.cogging_scale > 2 ||
     !Number.isFinite(options.friction_ma) || options.friction_ma < -1 || options.friction_ma > 80 ||
@@ -56,8 +56,8 @@ if (!Number.isInteger(options.mode) || !(options.mode <= 12 || options.mode >= 0
 }
 const server = spawn('openocd', [
   '-f', 'interface/stlink.cfg', '-c', `adapter serial ${args.serial}`,
-  '-c', 'transport select swd', '-f', 'target/stm32g4x.cfg',
-  '-c', 'adapter speed 1800', '-c', 'gdb port disabled', '-c', 'telnet port disabled',
+  '-f', 'target/stm32g4x.cfg',
+  '-c', 'adapter speed 1800', '-c', 'gdb port disabled', '-c', 'telnet_port disabled',
   '-c', 'tcl port 6667', '-c', 'init',
 ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
 let log = '';

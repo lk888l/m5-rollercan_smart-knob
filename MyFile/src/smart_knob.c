@@ -25,13 +25,15 @@
 #define SMART_KNOB_IDLE_CORRECTION_ALPHA_BASE 0.0005f
 #define SMART_KNOB_LEGACY_RATE_HZ (56000.0f / 11.0f)
 #define SMART_KNOB_SETTLE_TIME_MS 300U
-#define SMART_KNOB_MAX_SAMPLE_SPEED_RAD_S 80.0f
+#define SMART_KNOB_MAX_SAMPLE_SPEED_RAD_S 240.0f
 #define SMART_KNOB_MIN_SAMPLE_STEP_RAD DEG_TO_RAD(3.0f)
 #define SMART_KNOB_SAMPLE_RECOVERY_COUNT 2U
 #define SMART_KNOB_SPEED_DERATE_START_RAD_S 20.0f
 #define SMART_KNOB_SPEED_DERATE_STOP_RAD_S 45.0f
-#define SMART_KNOB_MAX_HAPTIC_SPEED_RAD_S 60.0f
-#define SMART_KNOB_HAPTIC_RESUME_SPEED_RAD_S 40.0f
+/* Keep the sample envelope above the cutoff so valid fast motion does not
+   disable haptics before the speed latch. Preserve hysteresis on recovery. */
+#define SMART_KNOB_MAX_HAPTIC_SPEED_RAD_S 180.0f
+#define SMART_KNOB_HAPTIC_RESUME_SPEED_RAD_S 120.0f
 #define SMART_KNOB_PID_LIMIT 10.0f
 #define SMART_KNOB_HARD_CURRENT_LIMIT_A 1.2f
 #define SMART_KNOB_CLICK_PHASE_MS 2U
@@ -279,7 +281,7 @@ static float stable_position(void)
                                SMART_KNOB_MAX_SAMPLE_SPEED_RAD_S * sample_time_s);
     if (active_mode == SMART_KNOB_MODE_FRICTIONLESS) {
         /* Check disagreement with the fast encoder velocity, not absolute
-           speed. A fixed 80 rad/s envelope would silently disable free spin.
+           speed. A fixed speed envelope would silently disable free spin.
            Allow quantization and velocity-filter lag while rejecting jumps. */
         const float expected_delta_rad = motor_rps_fast * sample_time_s;
         checked_delta_rad -= expected_delta_rad;
@@ -561,7 +563,7 @@ void init_smart_knob(void)
     sample_recovery_pending = false;
     sample_recovery_count = 0U;
     high_speed_active = active_mode != SMART_KNOB_MODE_FRICTIONLESS &&
-        fabsf(motor_rps) > SMART_KNOB_HAPTIC_RESUME_SPEED_RAD_S;
+        fabsf(motor_rps_fast) > SMART_KNOB_HAPTIC_RESUME_SPEED_RAD_S;
     last_command_current_ma = 0.0f;
 
     reanchor_active_mode(!controller_initialized);
@@ -596,7 +598,10 @@ static void smart_knob_step(bool apply_output)
     const uint32_t elapsed_us = micros() - last_sample_us;
     const float knob_position_rad = stable_position();
     const bool is_frictionless = active_mode == SMART_KNOB_MODE_FRICTIONLESS;
-    const float velocity_rad_s = is_frictionless ? motor_rps_fast : motor_rps;
+    /* Haptic damping must follow reversals within a detent. The legacy 2 Hz
+       speed estimate can retain the previous direction for tens of ms and
+       turn the D term into an accelerating torque after a fast release. */
+    const float velocity_rad_s = motor_rps_fast;
     update_high_speed_state(velocity_rad_s);
     if (!sample_valid || !isfinite(velocity_rad_s) ||
         (int32_t)(now_ms - enable_after_ms) < 0 ||
@@ -637,9 +642,9 @@ static void smart_knob_step(bool apply_output)
     const float snap_radians = width * config->snap_point;
     const float bias_radians = width * config->snap_point_bias;
 
-    /* At 1 kHz one transition is typical; the bounded loop also recovers
-       cleanly if a fast turn spans several very fine detents in one sample. */
-    for (uint8_t transition = 0U; transition < 8U; ++transition) {
+    /* At 1 kHz, the 240 rad/s sample envelope spans up to 14 one-degree
+       detents. Keep bounded catch-up above that worst-case step. */
+    for (uint8_t transition = 0U; transition < 16U; ++transition) {
         const float snap_decrease = snap_radians +
             (current_position <= 0 ? bias_radians : -bias_radians);
         const float snap_increase = -snap_radians +
@@ -756,8 +761,7 @@ bool smart_knob_select_mode(uint8_t mode_index)
         init_smart_knob();
     } else {
         reanchor_active_mode(true);
-        const float velocity = active_mode == SMART_KNOB_MODE_FRICTIONLESS
-                                   ? motor_rps_fast : motor_rps;
+        const float velocity = motor_rps_fast;
         update_high_speed_state(velocity);
         publish_runtime_state(velocity);
     }
@@ -771,8 +775,8 @@ void smart_knob_enter_navigation_mode(void)
         init_smart_knob();
     } else {
         reanchor_active_mode(true);
-        update_high_speed_state(motor_rps);
-        publish_runtime_state(motor_rps);
+        update_high_speed_state(motor_rps_fast);
+        publish_runtime_state(motor_rps_fast);
     }
 }
 

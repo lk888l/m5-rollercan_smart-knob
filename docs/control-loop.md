@@ -71,10 +71,11 @@ FOC 实现在 `MyFile/src/motordriver.c`。
 
 - 每个控制步读取一份一致的 `FastSensorSnapshot`；若读取与 FOC 更新碰撞，则保留上一份有效快照。
 
-- `MotorDriverGetMechanicalAngle()` 返回单圈角度，单位为 0.1 度。
-- 通过跨越 0/360 度边界判断 `mechanical_turns` 增减。
-- `mechanical_angle = 360 * mechanical_turns + encoder_absolute_angle_new`。
-- `mechanical_rad = mechanical_angle * PI / 180`。
+- `motion_estimator.c` 参考 `stm32g431-foc-canfd` 的 `AngleTracker`，将机械运动估计从系统调度中分离，可在主机上独立测试。
+- 位置与快速度共同使用快照中的完整 14-bit、已修正方向和零点的编码器计数，避免把 0.1 度显示角度用于触感控制。
+- 按 16384 count 的最短差展开整数圈数，再由圈数和单圈绝对计数构造 `mechanical_rad`；首次采样不会误判跨圈。
+- 只有新的有效快照会推进估计；速度和滤波系数使用 `micros()` 的实际间隔。重复时间不消费位移，超过 20 ms 的间隔清零速度并重新同步到最近圈角度。
+- `mechanical_angle` 由 `mechanical_rad` 换算为度，编码器校准时统一重置运动估计。
 - `speed_encoder_update()` 维护展开后的编码器计数。
 - 计数差按 1 kHz 调用率低通后换算：
   - `motor_rpm = diff / 16383 * (60 * 1000)`
@@ -82,7 +83,7 @@ FOC 实现在 `MyFile/src/motordriver.c`。
 
 速度、电流、电压和温度低通的系数已按 1 ms 采样周期重新计算。速度/位置 PID 仍保存原协议中的离散增益，但运行系数按原约 5.09 kHz 到 1 kHz 的周期比例转换：Ki 约乘 5.09，Kd 约除 5.09。
 
-无摩擦模式另用 `motor_rps_fast`：从完整编码器计数计算速度，以 8 ms 时间常数滤波。它不改变原有 2 Hz 速度估计和 PID 手感；编码器校准重同步时同时清零。
+所有 SmartKnob 模式及菜单导航均使用 `motor_rps_fast`，时间常数为 8 ms。阻尼、静止判定、高速保护和 SmartKnob 遥测使用同一路速度；传统速度 PID 和 RPM 读数继续使用原有 2 Hz `motor_rps` 路径。原先 coarse 使用约 80 ms 时间常数的慢速度，快速反弹时 D 项可能仍保留旧速度符号而继续加速。修复与实机记录见 [coarse 释放验证](coarse-release-validation.md)。
 
 ## 速度模式
 
@@ -162,7 +163,7 @@ Dial 模式由 `MyFile/src/smart_knob.c` 和 `MyFile/src/smart_knob_modes.c` 共
 - 触感输出使用 `(P * position_error - D * velocity) * current_scale`，再叠加摩擦补偿和可选双相 click 电流。
 - 电流同时受模式限幅、0–1000 ‰ 安全比例和底层 1.2 A 硬限制约束，最后调用 SmartKnob 专用的 `MotorDriverSetCurrentRealContinuous()`；其他控制模式仍调用带 60 mA 静音区的 `MotorDriverSetCurrentReal()`。
 - 只有无边界模式会在低速静止后慢慢修正 detent 中心；有边界模式保持固定中心网格。编码器跳变或进入模式后的稳定期输出 0，跳变保护连续取得两个合理样本后会重新同步，不会停留在永久无效状态。
-- 单中心回弹模式从 20 rad/s 开始削弱加速电流、45 rad/s 时完全取消加速电流；原有模式的高速保护在 60 rad/s 进入、40 rad/s 退出。无摩擦模式 12 不使用速度衰减或高速锁定，编码器位置增量根据快速度估计校验，不再套用原有 80 rad/s 采样门槛；电流限幅、故障和异常样本处理仍生效。
+- 单中心回弹模式从 20 rad/s 开始削弱加速电流、45 rad/s 时完全取消加速电流；普通 SmartKnob 模式的高速保护在 180 rad/s 进入、120 rad/s 退出。对应的编码器增量校验范围为 240 rad/s，防止采样校验先于高速保护取消效果。1 kHz 控制步最多处理 16 次跨挡，覆盖高速下的 1° 细挡位。无摩擦模式 12 不使用速度衰减或高速锁定，编码器位置增量根据快速度估计校验；电流限幅、故障和异常样本处理仍生效。实机验证见 [高速上限验证](smartknob-speed-limit-validation.md)。
 - `smart_knob_modes.h` 的 `SMART_KNOB_DEFAULT_MODE` 是唯一的默认预设选择点；各预设配置互相独立。
 - CAN 参数切换模式或修改手感仍在 ControlTask 执行；CommunicationTask 只读取一致快照并主动发送遥测。
 

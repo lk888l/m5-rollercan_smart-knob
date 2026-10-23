@@ -277,6 +277,273 @@ static void test_exact_center_still_commands_exact_zero(void)
     }
 }
 
+static void test_coarse_damping_uses_recent_motion(void)
+{
+    const char *name = "coarse_damping_uses_recent_motion";
+    smart_knob_modes_reset_defaults();
+    reset_controller(SMART_KNOB_MODE_COARSE_STRONG);
+
+    /* After release/rebound the 2 Hz legacy estimate can retain the opposite
+       sign for tens of milliseconds. D must oppose the recent encoder motion. */
+    motor_rps = 10.0f;
+    motor_rps_fast = -2.0f;
+    fake_time_us += 1000U;
+    handle_smart_knob();
+    require_true(name, commanded_current_ma > 0.0f,
+        "coarse damping must brake a reversal even while the legacy speed remains positive");
+    const SmartKnobRuntimeState state = runtime_state(name);
+    require_true(name, fabsf(state.shaft_velocity_rad_s + 2.0f) < 0.001f,
+        "telemetry must expose the velocity actually used by the haptic controller");
+
+    motor_rps_fast = 0.0f;
+    fake_time_us += 1000U;
+    handle_smart_knob();
+    require_true(name, commanded_current_ma == 0.0f,
+        "stopping at the center must not leave a torque from the old speed estimate");
+
+    motor_rps = 0.0f;
+    motor_rps_fast = 185.0f;
+    fake_time_us += 1000U;
+    handle_smart_knob();
+    require_true(name, commanded_current_ma == 0.0f &&
+        (runtime_state(name).flags & (1U << 5)) != 0U,
+        "fast flick protection must react before the legacy velocity catches up");
+}
+
+static void test_coarse_high_speed_retains_haptics(void)
+{
+    const char *name = "coarse_high_speed_retains_haptics";
+    const uint8_t modes[] = {SMART_KNOB_MODE_COARSE_STRONG, SMART_KNOB_MODE_COARSE_WEAK};
+    const float speeds[] = {70.0f, 110.0f, 130.0f, 170.0f};
+    for (unsigned mode = 0U; mode < 2U; ++mode) {
+        for (unsigned direction = 0U; direction < 2U; ++direction) {
+            for (unsigned speed = 0U; speed < sizeof(speeds) / sizeof(speeds[0]); ++speed) {
+                smart_knob_modes_reset_defaults();
+                reset_controller(modes[mode]);
+                smart_knob_mode_get_mutable(modes[mode])->config.position = 15;
+                require_true(name, smart_knob_select_mode(modes[mode]), "coarse mode selected");
+                const float velocity = (direction == 0U ? 1.0f : -1.0f) * speeds[speed];
+                unsigned torque_samples = 0U;
+                /* Integrate actual position so the encoder sample envelope is
+                   exercised along with the filtered-speed protection. */
+                for (unsigned sample = 0U; sample < 30U; ++sample) {
+                    advance_and_handle(mechanical_rad + velocity * 0.001f, velocity, 1000U);
+                    const SmartKnobRuntimeState state = runtime_state(name);
+                    require_true(name, (state.flags & (1U << 3)) != 0U,
+                        "fast continuous motion below the new limit must remain a valid sample");
+                    require_true(name, (state.flags & (1U << 5)) == 0U,
+                        "speeds from 70 through 170 rad/s must retain haptics in both directions");
+                    require_true(name, isfinite(commanded_current_ma) &&
+                        fabsf(commanded_current_ma) <= 450.01f,
+                        "extended-speed haptics must retain the preset current ceiling");
+                    if (fabsf(commanded_current_ma) > 1.0f) ++torque_samples;
+                }
+                require_true(name, torque_samples >= 20U,
+                    "valid fast motion must produce haptic output, not just clear the speed flag");
+            }
+        }
+    }
+}
+
+static void test_coarse_high_speed_hysteresis_and_sample_recovery(void)
+{
+    const char *name = "coarse_high_speed_hysteresis_and_sample_recovery";
+    for (unsigned direction = 0U; direction < 2U; ++direction) {
+        const float sign = direction == 0U ? 1.0f : -1.0f;
+        smart_knob_modes_reset_defaults();
+        reset_controller(SMART_KNOB_MODE_COARSE_STRONG);
+        const float speeds[] = {179.0f, 180.0f, 150.0f, 121.0f, 120.0f, 150.0f};
+        const bool inhibited[] = {false, true, true, true, false, false};
+        for (unsigned sample = 0U; sample < sizeof(speeds) / sizeof(speeds[0]); ++sample) {
+            const float velocity = sign * speeds[sample];
+            advance_and_handle(mechanical_rad + velocity * 0.001f, velocity, 1000U);
+            const SmartKnobRuntimeState state = runtime_state(name);
+            require_true(name, (state.flags & (1U << 3)) != 0U,
+                "protection and resume speeds must fit the valid encoder sample envelope");
+            require_true(name, ((state.flags & (1U << 5)) != 0U) == inhibited[sample],
+                "speed protection must enter at 180 and resume at 120 rad/s without chatter");
+            if (inhibited[sample]) require_true(name, commanded_current_ma == 0.0f,
+                "the high-speed lockout must command zero current");
+        }
+
+        /* Keep the filtered speed low while injecting a raw discontinuity.
+           Sample validity must reject it independently of speed lockout. */
+        advance_and_handle(mechanical_rad + sign * 0.239f, sign * 50.0f, 1000U);
+        require_true(name, (runtime_state(name).flags & (1U << 3)) != 0U,
+            "a 239 rad/s raw step must fit the expanded sample envelope");
+        advance_and_handle(mechanical_rad + sign * 0.250f, sign * 50.0f, 1000U);
+        require_true(name, (runtime_state(name).flags & (1U << 3)) == 0U &&
+            commanded_current_ma == 0.0f,
+            "a raw step above 240 rad/s must still reject the sample and clear output");
+        advance_and_handle(mechanical_rad + sign * 0.050f, sign * 50.0f, 1000U);
+        require_true(name, (runtime_state(name).flags & (1U << 3)) == 0U &&
+            commanded_current_ma == 0.0f,
+            "the first valid sample after a discontinuity must remain inhibited");
+        advance_and_handle(mechanical_rad + sign * 0.050f, sign * 50.0f, 1000U);
+        require_true(name, (runtime_state(name).flags & (1U << 3)) != 0U &&
+            (runtime_state(name).flags & (1U << 5)) == 0U &&
+            fabsf(commanded_current_ma) > 1.0f,
+            "two good samples must restore haptics without leaving a stale position baseline");
+    }
+}
+
+static void test_fine_high_speed_tracks_detent_center(void)
+{
+    const char *name = "fine_high_speed_tracks_detent_center";
+    const uint8_t modes[] = {SMART_KNOB_MODE_FINE_SMOOTH, SMART_KNOB_MODE_FINE_DETENTS};
+    const float speeds[] = {130.0f, 170.0f};
+    for (unsigned mode = 0U; mode < sizeof(modes) / sizeof(modes[0]); ++mode) {
+        for (unsigned direction = 0U; direction < 2U; ++direction) {
+            for (unsigned speed = 0U; speed < sizeof(speeds) / sizeof(speeds[0]); ++speed) {
+                smart_knob_modes_reset_defaults();
+                reset_controller(modes[mode]);
+                const PB_SmartKnobConfig *config = &smart_knob_active_config()->config;
+                const float velocity = (direction == 0U ? 1.0f : -1.0f) * speeds[speed];
+                /* At 170 rad/s, a 1 degree preset crosses nearly ten detents
+                   per millisecond. Stay away from the bounded endpoints so
+                   leftover displacement cannot be mistaken for an endstop. */
+                for (unsigned sample = 0U; sample < 12U; ++sample) {
+                    advance_and_handle(mechanical_rad + velocity * 0.001f, velocity, 1000U);
+                    const SmartKnobRuntimeState state = runtime_state(name);
+                    require_true(name, (state.flags & (1U << 3)) != 0U &&
+                        (state.flags & (1U << 5)) == 0U,
+                        "fine presets must retain valid haptics below the extended speed limit");
+                    require_true(name, current_position > config->min_position &&
+                        current_position < config->max_position,
+                        "fine high-speed tracking must be tested away from either endpoint");
+                    if (fabsf(state.sub_position_unit) > config->snap_point + 0.001f) {
+                        failf(name,
+                            "fine detent center must catch up within each control iteration",
+                            fabsf(state.sub_position_unit), config->snap_point);
+                    }
+                    require_true(name, isfinite(commanded_current_ma) &&
+                        fabsf(commanded_current_ma) <=
+                            smart_knob_active_config()->tuning.current_limit_a * 1000.0f + 0.01f,
+                        "fine high-speed tracking must retain its current ceiling");
+                }
+            }
+        }
+    }
+}
+
+static bool simulate_coarse_flick(uint8_t mode_index, int32_t initial_position,
+                                 float hand_speed, float coulomb_current_a)
+{
+    const char *name = "coarse_flick_release_settles";
+    const float dt = 0.001f;
+    const float encoder_step = 2.0f * PI / 16384.0f;
+    const float display_angle_step = PI / 1800.0f;
+    const float slow_alpha = dt / (dt + 1.0f / (2.0f * PI * 2.0f));
+    const float fast_alpha = dt / (dt + 0.008f);
+
+    smart_knob_modes_reset_defaults();
+    reset_controller(mode_index);
+    smart_knob_mode_get_mutable(mode_index)->config.position = initial_position;
+    require_true(name, smart_knob_select_mode(mode_index), "coarse preset must exist");
+    float angle = 0.0f;
+    float velocity = 0.0f;
+    float previous_encoder_angle = 0.0f;
+    float slow_velocity = 0.0f;
+    float fast_velocity = 0.0f;
+    float late_min = INFINITY;
+    float late_max = -INFINITY;
+    float late_peak_speed = 0.0f;
+
+    for (unsigned sample = 0U; sample < 1500U; ++sample) {
+        if (sample < 30U) {
+            velocity = hand_speed;
+            angle += velocity * dt;
+        } else {
+            /* Inertia and viscous loss use docs/frictionless-mode.md.
+               Coulomb loss also includes a lower-friction boundary case;
+               this is a stability model, not a substitute for hardware.
+               Substeps keep the plant integration stable at the 1 kHz
+               controller rate. */
+            for (unsigned substep = 0U; substep < 20U; ++substep) {
+                const float loss_a = coulomb_current_a * tanhf(velocity / 0.2f) +
+                                     0.000304f * velocity;
+                const float acceleration =
+                    (commanded_current_ma * 0.001f - loss_a) / 0.000135f;
+                velocity += acceleration * dt / 20.0f;
+                angle += velocity * dt / 20.0f;
+            }
+        }
+        const float encoder_angle = roundf(angle / encoder_step) * encoder_step;
+        const float raw_velocity = (encoder_angle - previous_encoder_angle) / dt;
+        previous_encoder_angle = encoder_angle;
+        slow_velocity += slow_alpha * (raw_velocity - slow_velocity);
+        fast_velocity += fast_alpha * (raw_velocity - fast_velocity);
+        mechanical_rad = roundf(angle / display_angle_step) * display_angle_step;
+        motor_rps = slow_velocity;
+        motor_rps_fast = fast_velocity;
+        fake_time_us += 1000U;
+        handle_smart_knob();
+        require_true(name, isfinite(commanded_current_ma) &&
+            fabsf(commanded_current_ma) <= 450.01f,
+            "release must always respect the preset current ceiling");
+        if (sample >= 1000U) {
+            late_min = fminf(late_min, angle);
+            late_max = fmaxf(late_max, angle);
+            late_peak_speed = fmaxf(late_peak_speed, fabsf(velocity));
+        }
+    }
+    printf("coarse release mode=%u start=%ld speed=%.0f friction_ma=%.0f late_span_deg=%.4f late_peak_rad_s=%.4f\n",
+        (unsigned)mode_index, (long)initial_position, (double)hand_speed,
+        (double)(1000.0f * coulomb_current_a),
+        (double)((late_max - late_min) * 180.0f / PI),
+        (double)late_peak_speed);
+    require_true(name, current_position >= 0 && current_position <= 31,
+        "flicking through an endpoint must retain the bounded preset position range");
+    return late_max - late_min < PI / 180.0f && late_peak_speed < 0.5f;
+}
+
+static void test_coarse_flick_release_settles(void)
+{
+    const uint8_t modes[] = {SMART_KNOB_MODE_COARSE_STRONG, SMART_KNOB_MODE_COARSE_WEAK};
+    const int32_t initial_positions[] = {15, 0, 31};
+    const float friction_currents[] = {0.005f, 0.022f};
+    bool all_settled = true;
+    for (unsigned mode = 0U; mode < 2U; ++mode) {
+        for (unsigned start = 0U; start < 3U; ++start) {
+            for (unsigned friction = 0U; friction < 2U; ++friction) {
+                for (unsigned direction = 0U; direction < 2U; ++direction) {
+                    const bool settled = simulate_coarse_flick(modes[mode],
+                        initial_positions[start], direction == 0U ? 30.0f : -30.0f,
+                        friction_currents[friction]);
+                    all_settled = all_settled && settled;
+                }
+            }
+        }
+    }
+    require_true("coarse_flick_release_settles", all_settled,
+        "both coarse presets must settle after release, including reversals and both endpoints");
+}
+
+static void test_coarse_fast_flick_release_settles(void)
+{
+    const uint8_t modes[] = {SMART_KNOB_MODE_COARSE_STRONG, SMART_KNOB_MODE_COARSE_WEAK};
+    const int32_t initial_positions[] = {15, 0, 31};
+    const float speeds[] = {70.0f, 110.0f, 130.0f, 170.0f};
+    const float friction_currents[] = {0.005f, 0.022f};
+    bool all_settled = true;
+    for (unsigned mode = 0U; mode < 2U; ++mode) {
+        for (unsigned start = 0U; start < 3U; ++start) {
+            for (unsigned speed = 0U; speed < sizeof(speeds) / sizeof(speeds[0]); ++speed) {
+                for (unsigned friction = 0U; friction < 2U; ++friction) {
+                    for (unsigned direction = 0U; direction < 2U; ++direction) {
+                        const bool settled = simulate_coarse_flick(modes[mode],
+                            initial_positions[start], (direction == 0U ? 1.0f : -1.0f) * speeds[speed],
+                            friction_currents[friction]);
+                        all_settled = all_settled && settled;
+                    }
+                }
+            }
+        }
+    }
+    require_true("coarse_fast_flick_release_settles", all_settled,
+        "both coarse presets must settle after releases through 170 rad/s at center and endpoints");
+}
+
 static void test_local_profile_applies_and_resets_preset_tuning(void)
 {
     static const char test_name[] = "local_profile_applies_and_resets_preset_tuning";
@@ -510,7 +777,7 @@ static void test_frictionless_unlimited_speed(void)
     require_true(name, commanded_current_ma == 0.0f, "overvoltage must still stop assist at high speed");
     over_vol_flag = 0U;
     (void)smart_knob_select_mode(SMART_KNOB_MODE_UNBOUNDED_SMOOTH);
-    move_for(65.0f, 10U);
+    move_for(185.0f, 10U);
     require_true(name, commanded_current_ma == 0.0f &&
         (runtime_state(name).flags & (1U << 5)) != 0U,
         "legacy modes must retain their high-speed inhibit after leaving frictionless");
@@ -1028,6 +1295,17 @@ int main(int argc, char **argv)
         test_bounded_coarse_idle_does_not_move_detent_center();
     } else if (strcmp(argv[1], "exact-center-zero") == 0) {
         test_exact_center_still_commands_exact_zero();
+    } else if (strcmp(argv[1], "coarse-damping-motion") == 0) {
+        test_coarse_damping_uses_recent_motion();
+    } else if (strcmp(argv[1], "coarse-flick-release") == 0) {
+        test_coarse_flick_release_settles();
+    } else if (strcmp(argv[1], "coarse-high-speed") == 0) {
+        test_coarse_high_speed_retains_haptics();
+        test_coarse_high_speed_hysteresis_and_sample_recovery();
+    } else if (strcmp(argv[1], "coarse-fast-flick-release") == 0) {
+        test_coarse_fast_flick_release_settles();
+    } else if (strcmp(argv[1], "fine-high-speed") == 0) {
+        test_fine_high_speed_tracks_detent_center();
     } else if (strcmp(argv[1], "local-profile") == 0) {
         test_local_profile_applies_and_resets_preset_tuning();
     } else if (strcmp(argv[1], "navigation-mode") == 0) {

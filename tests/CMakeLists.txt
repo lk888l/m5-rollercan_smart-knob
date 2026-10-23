@@ -4,6 +4,20 @@ project(smart_knob_host_tests C)
 
 enable_testing()
 
+add_executable(motion_estimator_tests
+    motion_estimator_tests.c
+    ../MyFile/src/motion_estimator.c
+)
+target_compile_features(motion_estimator_tests PRIVATE c_std_11)
+target_include_directories(motion_estimator_tests PRIVATE ../MyFile/inc)
+if(MSVC)
+    target_compile_options(motion_estimator_tests PRIVATE /W4)
+else()
+    target_compile_options(motion_estimator_tests PRIVATE -Wall -Wextra -Wpedantic)
+    target_link_libraries(motion_estimator_tests PRIVATE m)
+endif()
+add_test(NAME motion_estimator_wrap_timing_and_reset COMMAND motion_estimator_tests)
+
 add_executable(smart_knob_regression_tests
     smart_knob_regression_tests.c
     ../MyFile/src/smart_knob.c
@@ -32,6 +46,16 @@ add_test(
     NAME coarse_strong_current_continuity
     COMMAND smart_knob_regression_tests coarse-current-continuity
 )
+add_test(NAME coarse_damping_follows_fast_motion
+         COMMAND smart_knob_regression_tests coarse-damping-motion)
+add_test(NAME coarse_flick_release_settles
+         COMMAND smart_knob_regression_tests coarse-flick-release)
+add_test(NAME coarse_high_speed_limits_and_recovery
+         COMMAND smart_knob_regression_tests coarse-high-speed)
+add_test(NAME coarse_fast_flick_release_settles
+         COMMAND smart_knob_regression_tests coarse-fast-flick-release)
+add_test(NAME fine_high_speed_tracks_detent_center
+         COMMAND smart_knob_regression_tests fine-high-speed)
 add_test(
     NAME bounded_coarse_center_does_not_drift
     COMMAND smart_knob_regression_tests bounded-center-hold

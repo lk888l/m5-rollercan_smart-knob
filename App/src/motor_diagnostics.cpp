@@ -158,7 +158,7 @@ extern "C" bool MotorDiagnosticsStep(void)
         velocity_integral_ma = 0.0f;
         if (!std::isfinite(pulse_ma) || std::fabs(pulse_ma) > 250.0f ||
             !std::isfinite(pulse_velocity) || std::fabs(pulse_velocity) > 60.0f ||
-            motor_debug.dense > 1U || (motor_debug.dense != 0U && (pulse_velocity == 0.0f || pulse_ms == 0U)) ||
+            motor_debug.dense > 1U || (motor_debug.dense != 0U && pulse_ms == 0U) ||
             pulse_ms > 5000U || duration_ms < 400U || duration_ms > 30000U ||
             pulse_ms + 350U >= duration_ms || motor_mode != MODE_DIAL ||
             error_code != 0U || over_vol_flag != 0U ||
@@ -230,7 +230,9 @@ extern "C" bool MotorDiagnosticsStep(void)
         return true;
     }
     float command_ma = 0.0f;
-    if (mode == SMART_KNOB_MODE_FRICTIONLESS && elapsed < 350U + pulse_ms) {
+    if (mode < smart_knob_modes_count() && elapsed < 350U + pulse_ms) {
+        /* Track detent transitions during the simulated hand motion, so
+           release starts from the same state as a real manual flick. */
         smart_knob_observe_motion();
     }
     if (elapsed >= 350U && elapsed < 350U + pulse_ms) {

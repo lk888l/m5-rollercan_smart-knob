@@ -1207,6 +1207,11 @@
               <FileType>1</FileType>
               <FilePath>..\MyFile\src\encoder.c</FilePath>
             </File>
+              <File>
+                <FileName>motion_estimator.c</FileName>
+                <FileType>1</FileType>
+                <FilePath>..\MyFile\src\motion_estimator.c</FilePath>
+              </File>
             <File>
               <FileName>button.c</FileName>
               <FileType>1</FileType>

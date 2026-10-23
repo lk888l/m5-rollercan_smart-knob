@@ -105,6 +105,15 @@
 - `speed_encoder_update()` 在 `Loop_Control()` 中调用，用于速度估计。
 - `encoder_update()` 当前主要作为普通编码器事件 helper，菜单实际使用 Dial 的 `current_position` 映射出 `encoder_up/down`。
 
+## `MyFile/src/motion_estimator.c`
+
+职责：
+
+- 不依赖 HAL 的 14-bit 编码器多圈位置和低延迟速度估计。
+- 使用完整计数、整数圈数和实际采样间隔，统一处理跨圈、校准重置、重复时间和长时间停顿。
+- `Loop_Control()` 在新快照到达时调用；输出位置和 8 ms 时间常数的 `motor_rps_fast`，供全部 SmartKnob 模式使用。
+- `tests/motion_estimator_tests.c` 在主机上验证跨圈和时间边界。
+
 ## `MyFile/src/pid_controller.c`
 
 职责：
