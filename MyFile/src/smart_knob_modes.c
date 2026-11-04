@@ -98,7 +98,7 @@ static const SmartKnobModeConfig default_modes[SMART_KNOB_MODE_COUNT] = {
             .snap_point = 0.75f, .text = "Frictionless", .led_hue = 128,
         },
         .tuning = {
-            .p_gain = 8.0f, /* Additional nominal rotor inertias in FR-L. */
+            .p_gain = 0.0f, /* Optional extra inertia; off for a light yielding hold. */
             .d_gain = 0.010f, /* Acceleration filter time in seconds. */
             .current_scale_a = 0.987f, /* Dimensionless compensation scale here. */
             .current_limit_a = SMART_KNOB_FRICTIONLESS_CURRENT_LIMIT_MA / 1000.0f,

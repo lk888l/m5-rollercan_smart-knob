@@ -14,6 +14,7 @@
 #include "mysys.h"
 #include "smart_knob_modes.h"
 #include "frictionless_calibration.h"
+#include "frictionless_hold.h"
 
 #define SMART_KNOB_DEAD_ZONE_DETENT_PERCENT 0.2f
 #define SMART_KNOB_DEAD_ZONE_RAD DEG_TO_RAD(1.0f)
@@ -51,6 +52,8 @@
 #define SMART_KNOB_FRICTIONLESS_LIMIT_A (SMART_KNOB_FRICTIONLESS_CURRENT_LIMIT_MA / 1000.0f)
 #define SMART_KNOB_FRICTIONLESS_NOMINAL_INERTIA_A_S2_RAD 0.000135f
 #define SMART_KNOB_FRICTIONLESS_INERTIA_LIMIT_A 0.040f
+#define SMART_KNOB_FRICTIONLESS_MEAN_FEEDFORWARD_LIMIT_A 0.060f
+#define SMART_KNOB_FRICTIONLESS_RIPPLE_LIMIT_A 0.040f
 #define DEG_TO_RAD(deg) ((deg) * PI / 180.0f)
 #define RAD_TO_DEG(rad) ((rad) * 180.0f / PI)
 
@@ -79,14 +82,33 @@ static float frictionless_current_a;
 static float frictionless_ripple_blend;
 static float frictionless_inertia_velocity;
 static bool frictionless_inertia_initialized;
+static FrictionlessHoldState frictionless_hold;
+static FrictionlessHoldConfig frictionless_hold_config;
 #ifdef ROLLERCAN_MOTOR_DIAGNOSTICS
 static float frictionless_cogging_scale = 1.0f;
+static bool frictionless_hold_enabled = true;
 void smart_knob_set_test_cogging_scale(float scale)
 {
     frictionless_cogging_scale = isfinite(scale) ? fmaxf(0.0f, fminf(scale, 2.0f)) : 1.0f;
 }
+void smart_knob_set_test_hold_enabled(bool enabled)
+{
+    frictionless_hold_enabled = enabled;
+    frictionless_hold_reset(&frictionless_hold);
+}
+void smart_knob_get_frictionless_debug(SmartKnobFrictionlessDebug *state)
+{
+    if (state == NULL) return;
+    state->reference_rad_s = frictionless_hold.reference_velocity_rad_s;
+    state->correction_a = frictionless_hold.correction_current_a;
+    state->integral_a = frictionless_hold.integral_current_a;
+    state->feedforward_a = frictionless_current_a;
+    state->acceleration_rad_s2 = frictionless_hold.acceleration_rad_s2;
+    state->state = (uint32_t)frictionless_hold.phase;
+}
 #else
 static const float frictionless_cogging_scale = 1.0f;
+static const bool frictionless_hold_enabled = true;
 #endif
 static int8_t frictionless_direction;
 static uint32_t frictionless_started_ms;
@@ -231,6 +253,8 @@ static void reset_click(void)
 
 static void reset_frictionless(void)
 {
+    frictionless_hold_reset(&frictionless_hold);
+    frictionless_hold_config = frictionless_hold_default_config();
     frictionless_current_a = 0.0f;
     frictionless_ripple_blend = 0.0f;
     frictionless_direction = 0;
@@ -408,11 +432,13 @@ static float frictionless_inertia_current(const SmartKnobTuning *tuning,
 }
 
 static float frictionless_current(const SmartKnobTuning *tuning,
-                                  float velocity, uint32_t now_ms, float dt)
+                                   float velocity, uint32_t now_ms, float dt,
+                                   bool apply_output)
 {
     const float speed = fabsf(velocity);
     const int8_t direction = velocity > 0.0f ? 1 : -1;
     if (speed <= SMART_KNOB_FRICTIONLESS_STOP_RAD_S) {
+        frictionless_hold_reset(&frictionless_hold);
         if (frictionless_direction != 0) {
             frictionless_rearm_after_ms = now_ms + SMART_KNOB_FRICTIONLESS_REARM_MS;
         }
@@ -424,6 +450,7 @@ static float frictionless_current(const SmartKnobTuning *tuning,
         return 0.0f;
     }
     if (direction != frictionless_direction) {
+        frictionless_hold_reset(&frictionless_hold);
         if (frictionless_direction != 0) {
             frictionless_rearm_after_ms = now_ms + SMART_KNOB_FRICTIONLESS_REARM_MS;
         }
@@ -449,8 +476,8 @@ static float frictionless_current(const SmartKnobTuning *tuning,
         }
         frictionless_armed = true;
     }
-    /* Feed forward the estimated bearing/viscous loss. No velocity target or
-       integrator: a hand can slow, stop or reverse the shaft at any time. */
+    /* Loss feedforward supplies most of the mean torque; a yielding velocity
+       controller below cancels its residual bias without following drift. */
     const float blend = clampf((speed - SMART_KNOB_FRICTIONLESS_STOP_RAD_S) /
         (SMART_KNOB_FRICTIONLESS_FULL_RAD_S - SMART_KNOB_FRICTIONLESS_STOP_RAD_S),
         0.0f, 1.0f);
@@ -462,7 +489,11 @@ static float frictionless_current(const SmartKnobTuning *tuning,
         expf(-speed * speed / 9.0f);
     const float amplitude = tuning->current_scale_a * taper *
         (tuning->friction_current_a + low_speed_loss + tuning->viscous_friction_a_per_rad_s * speed);
-    const float target = (float)direction * fminf(amplitude, SMART_KNOB_FRICTIONLESS_LIMIT_A);
+    /* Persisted high FORCE values must not inject hundreds of mA before the
+       drift controller has had time to establish a correcting integral. */
+    const float feedforward_limit = frictionless_hold_enabled
+        ? SMART_KNOB_FRICTIONLESS_MEAN_FEEDFORWARD_LIMIT_A : SMART_KNOB_FRICTIONLESS_LIMIT_A;
+    const float target = (float)direction * fminf(amplitude, feedforward_limit);
     const float max_step = SMART_KNOB_FRICTIONLESS_SLEW_A_S * dt;
     frictionless_current_a += clampf(target - frictionless_current_a, -max_step, max_step);
     /* Identified from bidirectional driven sweeps on this module. The spatial
@@ -476,9 +507,25 @@ static float frictionless_current(const SmartKnobTuning *tuning,
     const float ripple_limit_scale = amplitude > 1e-6f
         ? fminf(1.0f, fabsf(frictionless_current_a) / amplitude) : 0.0f;
     const float inertia_a = frictionless_inertia_current(tuning, velocity, dt);
-    return clampf(frictionless_current_a + tuning->current_scale_a * taper *
-                  frictionless_ripple_blend * frictionless_cogging_scale * ripple_limit_scale * ripple_a +
-                  inertia_a,
+    float angle_a = tuning->current_scale_a * taper * frictionless_ripple_blend *
+        frictionless_cogging_scale * ripple_limit_scale * ripple_a;
+    if (frictionless_hold_enabled) {
+        angle_a = clampf(angle_a, -SMART_KNOB_FRICTIONLESS_RIPPLE_LIMIT_A,
+                         SMART_KNOB_FRICTIONLESS_RIPPLE_LIMIT_A);
+    }
+    float mean_current_a = frictionless_current_a;
+    if (frictionless_hold_enabled && tuning->current_scale_a > 0.0f) {
+        const float budget_a = fminf(SMART_KNOB_FRICTIONLESS_LIMIT_A,
+            fminf(tuning->current_limit_a, SMART_KNOB_HARD_CURRENT_LIMIT_A *
+                  tuning->max_current_permille / 1000.0f));
+        const float hold_a = frictionless_hold_step(&frictionless_hold,
+            &frictionless_hold_config, velocity, frictionless_current_a,
+            fmaxf(0.0f, budget_a - fabsf(angle_a + inertia_a)), dt, apply_output);
+        if (apply_output) mean_current_a = hold_a;
+    } else {
+        frictionless_hold_reset(&frictionless_hold);
+    }
+    return clampf(mean_current_a + angle_a + inertia_a,
                   -SMART_KNOB_FRICTIONLESS_LIMIT_A, SMART_KNOB_FRICTIONLESS_LIMIT_A);
 }
 
@@ -694,7 +741,8 @@ static void smart_knob_step(bool apply_output)
     requested_current_a += friction_request_a + click_request_a;
     if (is_frictionless) {
         requested_current_a = frictionless_current(tuning, velocity_rad_s, now_ms,
-                                                   (float)elapsed_us * 1e-6f);
+                                                   (float)elapsed_us * 1e-6f,
+                                                   apply_output);
     }
 
     /* Quantized encoder speed can leave a tiny D request while the shaft is

@@ -37,9 +37,25 @@ struct MotorDebugDenseSample {
     float filtered_command_ma;
 };
 
+struct MotorDebugHoldSample {
+    uint32_t elapsed_ms;
+    float angle_rad;
+    float velocity_rad_s;
+    float mean_velocity_rad_s;
+    float command_ma;
+    float measured_ma;
+    float reference_rad_s;
+    float correction_ma;
+    float integral_ma;
+    float feedforward_ma;
+    float acceleration_rad_s2;
+    uint32_t state;
+};
+
 union MotorDebugSamples {
     MotorDebugSample normal[128];
     MotorDebugDenseSample dense[384];
+    MotorDebugHoldSample hold[128];
 };
 
 struct MotorDebugMailbox {
@@ -57,21 +73,27 @@ struct MotorDebugMailbox {
     float pulse_velocity_rad_s; // Nonzero: velocity PI during the bounded pulse.
     float compensation_scale;   // Negative: preset; temporary override.
     float cogging_scale;
-    uint32_t dense;             // 1: final 384 ms at 1 kHz; shares the normal buffer.
+    uint32_t dense;             // 0: normal, 1: final 384 ms at 1 kHz, 2: hold telemetry.
     float inertia_gain;         // Negative: preset; extra rotor inertia multiples.
     float inertia_tau_ms;       // Negative: preset; velocity-memory filter time.
+    float disturb_ma;           // Bounded additional torque during FR-L release only.
+    uint32_t disturb_start_ms;  // Absolute elapsed time from the beginning of the test.
+    uint32_t disturb_ms;
+    float speed_limit_rad_s;    // Independent test cutoff, (0, 200] rad/s.
     MotorDebugSamples samples;
 };
 static_assert(offsetof(MotorDebugMailbox, dense) == 56U &&
-              offsetof(MotorDebugMailbox, samples) == 68U &&
+              offsetof(MotorDebugMailbox, disturb_ma) == 68U &&
+              offsetof(MotorDebugMailbox, samples) == 84U &&
               sizeof(MotorDebugSample) == 48U &&
               sizeof(MotorDebugDenseSample) == 16U &&
+              sizeof(MotorDebugHoldSample) == 48U &&
               sizeof(MotorDebugSamples) == 6144U &&
-              sizeof(MotorDebugMailbox) == 6212U,
+              sizeof(MotorDebugMailbox) == 6228U,
               "Update the diagnostic ABI and host script when the layout changes");
 
 extern "C" {
-volatile MotorDebugMailbox motor_debug = {0x4B4E4406U}; // Versioned diagnostic ABI.
+volatile MotorDebugMailbox motor_debug = {0x4B4E4407U}; // Versioned diagnostic ABI.
 }
 
 namespace {
@@ -94,6 +116,11 @@ float filtered_cos12;
 float filtered_command_sum;
 float filtered_sin_sum;
 float filtered_cos_sum;
+uint32_t capture_kind;
+float disturb_ma;
+uint32_t disturb_start_ms;
+uint32_t disturb_ms;
+float speed_limit_rad_s;
 
 void Stop(uint32_t status)
 {
@@ -155,10 +182,25 @@ extern "C" bool MotorDiagnosticsStep(void)
         duration_ms = motor_debug.duration_ms;
         pulse_ma = motor_debug.pulse_ma;
         pulse_velocity = motor_debug.pulse_velocity_rad_s;
+        capture_kind = motor_debug.dense;
+        disturb_ma = motor_debug.disturb_ma;
+        disturb_start_ms = motor_debug.disturb_start_ms;
+        disturb_ms = motor_debug.disturb_ms;
+        speed_limit_rad_s = motor_debug.speed_limit_rad_s;
         velocity_integral_ma = 0.0f;
+        motor_debug.count = 0U;
         if (!std::isfinite(pulse_ma) || std::fabs(pulse_ma) > 250.0f ||
             !std::isfinite(pulse_velocity) || std::fabs(pulse_velocity) > 60.0f ||
-            motor_debug.dense > 1U || (motor_debug.dense != 0U && pulse_ms == 0U) ||
+            capture_kind > 2U || (capture_kind == 1U && pulse_ms == 0U) ||
+            (capture_kind == 2U && mode != SMART_KNOB_MODE_FRICTIONLESS) ||
+            !std::isfinite(speed_limit_rad_s) || speed_limit_rad_s <= 0.0f ||
+            speed_limit_rad_s > 200.0f || std::fabs(pulse_velocity) > speed_limit_rad_s ||
+            !std::isfinite(disturb_ma) || std::fabs(disturb_ma) > 80.0f ||
+            disturb_start_ms > 30000U || disturb_ms > 5000U ||
+            (disturb_ma == 0.0f && (disturb_ms != 0U || disturb_start_ms != 0U)) ||
+            (disturb_ma != 0.0f && (mode != SMART_KNOB_MODE_FRICTIONLESS ||
+                disturb_ms == 0U || disturb_start_ms < 350U + pulse_ms ||
+                disturb_start_ms + disturb_ms > duration_ms)) ||
             pulse_ms > 5000U || duration_ms < 400U || duration_ms > 30000U ||
             pulse_ms + 350U >= duration_ms || motor_mode != MODE_DIAL ||
             error_code != 0U || over_vol_flag != 0U ||
@@ -193,7 +235,7 @@ extern "C" bool MotorDiagnosticsStep(void)
         MotorDriverSetCurrentRealContinuous(0.0f);
         MotorDriverSetMode(MDRV_MODE_RUN);
         started_ms = now;
-        next_sample_ms = motor_debug.dense != 0U ? duration_ms - 384U : 0U;
+        next_sample_ms = capture_kind == 1U ? duration_ms - 384U : 0U;
         command_sum_ma = 0.0f;
         velocity_sum_rad_s = 0.0f;
         window_count = 0U;
@@ -204,7 +246,7 @@ extern "C" bool MotorDiagnosticsStep(void)
         filtered_sin_sum = 0.0f;
         filtered_cos_sum = 0.0f;
         motor_debug.count = 0U;
-        motor_debug.period_ms = motor_debug.dense != 0U ? 1U : (duration_ms + 127U) / 128U;
+        motor_debug.period_ms = capture_kind == 1U ? 1U : (duration_ms + 127U) / 128U;
         motor_debug.status = 1U;
     }
     if (!owns_output) {
@@ -219,9 +261,8 @@ extern "C" bool MotorDiagnosticsStep(void)
     }
     const uint32_t elapsed = now - started_ms;
     if (error_code != 0U || over_vol_flag != 0U ||
-        /* Only this timed diagnostic stops at 200 rad/s. The production
-           frictionless controller has no speed-based derating or cutoff. */
-        !std::isfinite(motor_rps_fast) || std::fabs(motor_rps_fast) > 200.0f) {
+        /* Independent bounded-test protection, regardless of preset policy. */
+        !std::isfinite(motor_rps_fast) || std::fabs(motor_rps_fast) > speed_limit_rad_s) {
         Stop(3U);
         return true;
     }
@@ -230,6 +271,7 @@ extern "C" bool MotorDiagnosticsStep(void)
         return true;
     }
     float command_ma = 0.0f;
+    bool release_state_valid = false;
     if (mode < smart_knob_modes_count() && elapsed < 350U + pulse_ms) {
         /* Track detent transitions during the simulated hand motion, so
            release starts from the same state as a real manual flick. */
@@ -255,9 +297,34 @@ extern "C" bool MotorDiagnosticsStep(void)
         SmartKnobRuntimeState state{};
         if (smart_knob_get_runtime_state(&state)) {
             command_ma = state.commanded_current_ma;
+            constexpr uint8_t required_flags = (1U << 0) | (1U << 1) | (1U << 3);
+            constexpr uint8_t fault_flags = (1U << 6) | (1U << 7);
+            release_state_valid = state.active_mode == SMART_KNOB_MODE_FRICTIONLESS &&
+                (state.flags & required_flags) == required_flags &&
+                (state.flags & fault_flags) == 0U && std::isfinite(command_ma);
         }
     } else {
         MotorDriverSetCurrentRealContinuous(0.0f);
+    }
+    if (disturb_ms != 0U && elapsed >= disturb_start_ms &&
+        elapsed - disturb_start_ms < disturb_ms) {
+        /* Never override a zero requested by the normal controller's sample
+           rejection/fault path, even when the bridge is still enabled. */
+        if (!release_state_valid || !MotorDriverIsOutputEnabled() ||
+            motor_mode != MODE_DIAL || error_code != 0U || over_vol_flag != 0U) {
+            Stop(3U);
+            return true;
+        }
+        /* Emulate a hand torque without sending interaction-state events to
+           the controller. Preserve the preset's current and safety limits. */
+        const SmartKnobTuning &tuning = smart_knob_mode_get(
+            SMART_KNOB_MODE_FRICTIONLESS)->tuning;
+        const float limit_ma = std::fmin(
+            static_cast<float>(SMART_KNOB_FRICTIONLESS_CURRENT_LIMIT_MA),
+            std::fmin(tuning.current_limit_a * 1000.0f,
+                      1.2f * static_cast<float>(tuning.max_current_permille)));
+        command_ma = std::fmax(-limit_ma, std::fmin(limit_ma, command_ma + disturb_ma));
+        MotorDriverSetTorqueCurrent(command_ma);
     }
     command_sum_ma += command_ma;
     velocity_sum_rad_s += motor_rps_fast;
@@ -272,7 +339,7 @@ extern "C" bool MotorDiagnosticsStep(void)
     filtered_sin_sum += filtered_sin12;
     filtered_cos_sum += filtered_cos12;
     ++window_count;
-    if (motor_debug.dense != 0U && elapsed >= next_sample_ms && motor_debug.count < 384U) {
+    if (capture_kind == 1U && elapsed >= next_sample_ms && motor_debug.count < 384U) {
         /* The shared buffer holds only the final 384 ms of the bounded test.
            Sampling is independent of PI/release phase; the analysis selects
            intervals wholly inside PI and uses the matched 8 ms signals. */
@@ -284,20 +351,38 @@ extern "C" bool MotorDiagnosticsStep(void)
         __DMB();
         ++motor_debug.count;
         next_sample_ms = elapsed + 1U;
-    } else if (motor_debug.dense == 0U && elapsed >= next_sample_ms && motor_debug.count < 128U) {
-        volatile MotorDebugSample &sample = motor_debug.samples.normal[motor_debug.count];
-        sample.elapsed_ms = elapsed;
-        sample.angle_rad = mechanical_rad;
-        sample.velocity_rad_s = motor_rps_fast;
-        sample.slow_velocity_rad_s = motor_rps;
-        sample.command_ma = command_ma;
-        sample.measured_ma = ph_current_rt;
-        sample.uq_v = uq;
-        sample.mean_command_ma = command_sum_ma / static_cast<float>(window_count);
-        sample.mean_velocity_rad_s = velocity_sum_rad_s / static_cast<float>(window_count);
-        sample.mean_filtered_command_ma = filtered_command_sum / static_cast<float>(window_count);
-        sample.mean_filtered_sin12 = filtered_sin_sum / static_cast<float>(window_count);
-        sample.mean_filtered_cos12 = filtered_cos_sum / static_cast<float>(window_count);
+    } else if (capture_kind != 1U && elapsed >= next_sample_ms && motor_debug.count < 128U) {
+        if (capture_kind == 2U) {
+            SmartKnobFrictionlessDebug debug{};
+            (void)smart_knob_get_frictionless_debug(&debug);
+            volatile MotorDebugHoldSample &sample = motor_debug.samples.hold[motor_debug.count];
+            sample.elapsed_ms = elapsed;
+            sample.angle_rad = mechanical_rad;
+            sample.velocity_rad_s = motor_rps_fast;
+            sample.mean_velocity_rad_s = velocity_sum_rad_s / static_cast<float>(window_count);
+            sample.command_ma = command_ma;
+            sample.measured_ma = ph_current_rt;
+            sample.reference_rad_s = debug.reference_rad_s;
+            sample.correction_ma = debug.correction_a * 1000.0f;
+            sample.integral_ma = debug.integral_a * 1000.0f;
+            sample.feedforward_ma = debug.feedforward_a * 1000.0f;
+            sample.acceleration_rad_s2 = debug.acceleration_rad_s2;
+            sample.state = debug.state;
+        } else {
+            volatile MotorDebugSample &sample = motor_debug.samples.normal[motor_debug.count];
+            sample.elapsed_ms = elapsed;
+            sample.angle_rad = mechanical_rad;
+            sample.velocity_rad_s = motor_rps_fast;
+            sample.slow_velocity_rad_s = motor_rps;
+            sample.command_ma = command_ma;
+            sample.measured_ma = ph_current_rt;
+            sample.uq_v = uq;
+            sample.mean_command_ma = command_sum_ma / static_cast<float>(window_count);
+            sample.mean_velocity_rad_s = velocity_sum_rad_s / static_cast<float>(window_count);
+            sample.mean_filtered_command_ma = filtered_command_sum / static_cast<float>(window_count);
+            sample.mean_filtered_sin12 = filtered_sin_sum / static_cast<float>(window_count);
+            sample.mean_filtered_cos12 = filtered_cos_sum / static_cast<float>(window_count);
+        }
         filtered_command_sum = 0.0f;
         filtered_sin_sum = 0.0f;
         filtered_cos_sum = 0.0f;

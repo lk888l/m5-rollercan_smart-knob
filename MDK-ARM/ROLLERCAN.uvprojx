@@ -1228,6 +1228,11 @@
               <FilePath>..\MyFile\src\smart_knob.c</FilePath>
             </File>
             <File>
+              <FileName>frictionless_hold.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\MyFile\src\frictionless_hold.c</FilePath>
+            </File>
+            <File>
               <FileName>tle5012b.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\MyFile\src\tle5012b.c</FilePath>

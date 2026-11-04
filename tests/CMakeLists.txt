@@ -22,6 +22,7 @@ add_executable(smart_knob_regression_tests
     smart_knob_regression_tests.c
     ../MyFile/src/smart_knob.c
     ../MyFile/src/smart_knob_modes.c
+    ../MyFile/src/frictionless_hold.c
 )
 
 target_compile_features(smart_knob_regression_tests PRIVATE c_std_11)
@@ -123,6 +124,7 @@ add_executable(host_compatibility_tests
     ../MyFile/src/host_control.c
     ../MyFile/src/smart_knob.c
     ../MyFile/src/smart_knob_modes.c
+    ../MyFile/src/frictionless_hold.c
     ../MyFile/src/smart_knob_persistence.c
 )
 
@@ -159,8 +161,8 @@ add_test(NAME firmware_presets_match_host_table
 add_test(NAME frictionless_canonical_can_and_persistence_parameters
          COMMAND host_compatibility_tests frictionless-canonical)
 
-add_test(NAME frictionless_unlimited_speed
-         COMMAND smart_knob_regression_tests frictionless-unlimited)
+add_test(NAME frictionless_unlimited_speed_and_recovery
+         COMMAND smart_knob_regression_tests frictionless-unlimited-speed)
 add_test(NAME frictionless_observer_never_writes_actuator
          COMMAND smart_knob_regression_tests frictionless-observer)
 add_test(NAME frictionless_observed_motion_handover_is_continuous
@@ -177,3 +179,34 @@ add_test(NAME frictionless_inertia_parameter_and_current_limits
          COMMAND smart_knob_regression_tests frictionless-inertia-limits)
 add_test(NAME frictionless_inertia_observer_continuity
          COMMAND smart_knob_regression_tests frictionless-inertia-observer)
+
+add_test(NAME frictionless_hold_rejects_model_error
+         COMMAND smart_knob_regression_tests frictionless-hold-plant)
+add_test(NAME frictionless_hold_captures_release_after_real_launch
+         COMMAND smart_knob_regression_tests frictionless-hold-launch)
+add_test(NAME frictionless_hold_rejects_temperature_drift_and_residual_load
+         COMMAND smart_knob_regression_tests frictionless-hold-drift)
+add_test(NAME frictionless_hold_stop_reversal_fault_and_mode_reset
+         COMMAND smart_knob_regression_tests frictionless-hold-reset)
+add_test(NAME frictionless_hold_gesture_releases_old_speed
+         COMMAND smart_knob_regression_tests frictionless-hold-gesture)
+add_test(NAME frictionless_hold_observer_releases_at_current_speed
+         COMMAND smart_knob_regression_tests frictionless-hold-handover)
+add_test(NAME frictionless_hold_gentle_start_and_slow_gestures
+         COMMAND smart_knob_regression_tests frictionless-hold-slow-gesture)
+add_test(NAME frictionless_hold_extreme_saved_tuning_and_small_current_budget
+         COMMAND smart_knob_regression_tests frictionless-hold-current-budget)
+
+add_executable(frictionless_hold_tests
+    frictionless_hold_tests.c
+    ../MyFile/src/frictionless_hold.c
+)
+target_compile_features(frictionless_hold_tests PRIVATE c_std_11)
+target_include_directories(frictionless_hold_tests PRIVATE ../MyFile/inc)
+if(MSVC)
+    target_compile_options(frictionless_hold_tests PRIVATE /W4)
+else()
+    target_compile_options(frictionless_hold_tests PRIVATE -Wall -Wextra -Wpedantic)
+    target_link_libraries(frictionless_hold_tests PRIVATE m)
+endif()
+add_test(NAME frictionless_hold_controller COMMAND frictionless_hold_tests)

@@ -146,6 +146,7 @@
 ## `MyFile/src/smart_knob_modes.c`
 
 - 保存与上位机 `rollercan.rs` 冻结表一致的 12 个原有预设，并追加无摩擦模式 12。
+- 无摩擦模式通过 `frictionless_hold.c` 提供柔性速度保持、运动让步、限幅和积分抗饱和；停止、换向及故障清除旧参考。诊断观察与真实手拨启动分别验证，避免仅测试速度驱动交接而遗漏用户起拨路径。
 - 导入/导出 13×（宽度+8 tuning）和 Custom 14 项的完整 RAM 快照。
 - 将活动模式投影为 OLED 的 MODE/FORCE/STEP/LIMIT，并报告不可表达字段 mask。
 - `smart_knob_mode_apply_local_edit()` 只覆盖 dirty 字段，保留隐藏高级参数。

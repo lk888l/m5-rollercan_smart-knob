@@ -115,6 +115,9 @@ static void reset_controller(uint8_t mode_index)
     over_vol_flag = 0U;
     motor_mode = MODE_DIAL;
     output_enabled = 1U;
+    /* Legacy component tests isolate feedforward/inertia. The closed-loop
+       integration fixtures below explicitly enable production speed hold. */
+    smart_knob_set_test_hold_enabled(false);
 
     require_true("reset_controller",
                  smart_knob_select_mode(mode_index),
@@ -704,10 +707,10 @@ static void test_frictionless_limits_and_recovery(void)
     require_true(name, commanded_current_ma <= 5.01f, "mode current limit must still apply");
     move_for(46.0f, 100U);
     require_true(name, fabsf(commanded_current_ma - 5.0f) < 0.01f && zero_current_tracking,
-        "frictionless assist must not derate above the old 45 rad/s threshold");
+        "FR-L must preserve the configured current ceiling without derating above 45 rad/s");
     move_for(65.0f, 50U);
-    require_true(name, fabsf(commanded_current_ma - 5.0f) < 0.01f,
-        "frictionless assist must bypass the legacy 60 rad/s inhibit");
+    require_true(name, fabsf(commanded_current_ma - 5.0f) < 0.01f && zero_current_tracking,
+        "FR-L must continue accelerating assistance above 60 rad/s while preserving the current limit");
     move_for(10.0f, 100U);
     require_true(name, commanded_current_ma > 0.0f, "assist must recover after speed returns to range");
     advance_and_handle(mechanical_rad + 2.0f, 10.0f, 1000U);
@@ -747,20 +750,21 @@ static void test_frictionless_unlimited_speed(void)
     require_true(name, fabsf(mode->tuning.current_scale_a - 0.987f) < 0.0001f &&
         fabsf(mode->tuning.friction_current_a - 0.022f) < 0.0001f &&
         fabsf(mode->tuning.viscous_friction_a_per_rad_s - 0.000304f) < 1e-7f &&
-        mode->tuning.p_gain == 8.0f && fabsf(mode->tuning.d_gain - 0.010f) < 1e-7f,
-        "the calibrated loss and virtual inertia preset must be available through normal mode configuration");
-    /* Isolate the unrestricted loss law; acceleration and observer behavior
-       are covered by the inertia cases at physically useful speeds. */
+        mode->tuning.p_gain == 0.0f && fabsf(mode->tuning.d_gain - 0.010f) < 1e-7f,
+        "the calibrated loss preset must default to no added inertia for responsive gesture control");
+    /* Isolate the loss model. Large continuous encoder steps remain valid;
+       speed alone must not reduce acceleration assistance or impose a latch. */
     mode->tuning.p_gain = 0.0f;
-    const float speeds[] = {10.0f, 20.0f, 30.0f, 45.0f, 60.0f, 80.0f, 120.0f,
-                            250.0f, 1000.0f, 2000.0f, 3000.0f, -120.0f, -250.0f, -3000.0f};
+    const float speeds[] = {10.0f, 30.0f, 45.0f, 52.5f, 59.0f, 60.0f, 80.0f, 120.0f,
+                            250.0f, 1000.0f, 2000.0f, 3000.0f, -45.0f, -52.5f, -60.0f,
+                            -80.0f, -120.0f, -3000.0f};
     for (unsigned i = 0U; i < sizeof(speeds) / sizeof(speeds[0]); ++i) {
         const float velocity = speeds[i];
         move_for(velocity, 1100U);
         const float expected_ma = copysignf(fminf(800.0f,
             987.0f * (0.022f + 0.000304f * fabsf(velocity))), velocity);
         require_true(name, fabsf(commanded_current_ma - expected_ma) < 0.1f,
-            "both directions must receive the full requested current regardless of speed");
+            "both directions must receive the full requested loss compensation regardless of speed");
         const SmartKnobRuntimeState state = runtime_state(name);
         require_true(name, (state.flags & (1U << 3)) != 0U && (state.flags & (1U << 5)) == 0U,
             "continuous high-speed samples must remain valid without a speed inhibit flag");
@@ -770,8 +774,9 @@ static void test_frictionless_unlimited_speed(void)
     require_true(name, commanded_current_ma == 0.0f,
         "removing speed caps must not remove the encoder discontinuity check");
     move_for(-120.0f, 300U);
-    require_true(name, commanded_current_ma < -50.0f,
-        "valid high-speed samples must recover after a discontinuity");
+    require_true(name, commanded_current_ma < -50.0f &&
+        (runtime_state(name).flags & (1U << 3)) != 0U,
+        "valid high-speed samples must recover normal assistance after a discontinuity");
     over_vol_flag = 1U;
     move_for(-120.0f, 1U);
     require_true(name, commanded_current_ma == 0.0f, "overvoltage must still stop assist at high speed");
@@ -785,8 +790,23 @@ static void test_frictionless_unlimited_speed(void)
     require_true(name, (runtime_state(name).flags & (1U << 5)) == 0U,
         "entering frictionless must immediately clear a legacy speed latch");
     move_for(120.0f, 300U);
-    require_true(name, commanded_current_ma > 50.0f,
-        "switching from an inhibited legacy mode must restore high-speed frictionless assist");
+    require_true(name, commanded_current_ma > 50.0f && zero_current_tracking,
+        "switching from an inhibited legacy mode must restore high-speed FR-L assistance");
+    move_for(10.0f, 300U);
+    require_true(name, commanded_current_ma > 20.0f,
+        "returning to a slower speed must retain assistance without a permanent speed latch");
+
+    mode->tuning.friction_current_a = 0.0f;
+    mode->tuning.viscous_friction_a_per_rad_s = 0.0f;
+    mode->tuning.p_gain = 8.0f;
+    mode->tuning.d_gain = 0.005f;
+    for (unsigned direction = 0U; direction < 2U; ++direction) {
+        const float sign = direction == 0U ? 1.0f : -1.0f;
+        move_for(sign * 65.0f, 300U);
+        move_for(sign * 120.0f, 1U);
+        require_true(name, fabsf(commanded_current_ma + sign * 40.0f) < 0.01f,
+            "high-speed motion must also preserve inertia braking in both directions");
+    }
 }
 
 /* These fixtures set their own tuning so control invariants do not depend on
@@ -1282,6 +1302,422 @@ static void test_frictionless_inertia_observer_continuity(void)
     }
 }
 
+static SmartKnobModeConfig *reset_hold_fixture(void)
+{
+    smart_knob_modes_reset_defaults();
+    reset_controller(SMART_KNOB_MODE_FRICTIONLESS);
+    smart_knob_set_test_hold_enabled(true);
+    /* A mean-load plant cannot validate the measured spatial calibration.
+       Its independent angle-domain regressions remain above. */
+    smart_knob_set_test_cogging_scale(0.0f);
+    return smart_knob_mode_get_mutable(SMART_KNOB_MODE_FRICTIONLESS);
+}
+
+static float nominal_loss_ma(float velocity)
+{
+    const SmartKnobModeConfig *mode = smart_knob_active_config();
+    const float speed = fabsf(velocity);
+    return copysignf(1000.0f * mode->tuning.current_scale_a *
+        (mode->tuning.friction_current_a * (1.0f + 0.30f * expf(-speed * speed / 9.0f)) +
+         mode->tuning.viscous_friction_a_per_rad_s * speed), velocity);
+}
+
+static void test_frictionless_hold_rejects_model_error(void)
+{
+    const char *name = "frictionless_hold_rejects_model_error";
+    const float initial_speeds[] = {3.0f, 6.0f, 20.0f};
+    const float actual_friction_ma[] = {17.0f, 25.0f};
+    float worst_final_error = 0.0f, worst_excursion = 0.0f;
+    for (unsigned direction = 0U; direction < 2U; ++direction) {
+        for (unsigned speed_index = 0U; speed_index < 3U; ++speed_index) {
+            for (unsigned load_index = 0U; load_index < 2U; ++load_index) {
+                reset_hold_fixture();
+                const float initial = initial_speeds[speed_index] *
+                    (direction == 0U ? 1.0f : -1.0f);
+                /* Diagnostic-controlled motion prewarms the compensation;
+                   its release gives the controller a known measured speed. */
+                observe_for(initial, 500U);
+                move_for(initial, 1U);
+                float actual_velocity = initial, measured_velocity = initial;
+                for (unsigned sample = 0U; sample < 20000U; ++sample) {
+                    const float speed = fabsf(actual_velocity);
+                    const float load = copysignf(actual_friction_ma[load_index] *
+                        (1.0f + 0.30f * expf(-speed * speed / 9.0f)) +
+                        (load_index == 0U ? 0.20f : 0.40f) * speed, actual_velocity);
+                    /* Measured rotor inertia and the real 8 ms velocity
+                       filter; no external torque is applied after release. */
+                    actual_velocity += (commanded_current_ma - load) * 0.001f / 0.135f;
+                    measured_velocity += (actual_velocity - measured_velocity) / 9.0f;
+                    advance_and_handle(mechanical_rad + actual_velocity * 0.001f,
+                                       measured_velocity, 1000U);
+                    require_true(name, isfinite(actual_velocity) &&
+                        actual_velocity * initial > 0.0f && fabsf(actual_velocity) < 40.0f,
+                        "fixed friction error must not cause a stop, reversal or runaway");
+                    require_true(name, zero_current_tracking &&
+                        (runtime_state(name).flags & (1U << 3)) != 0U,
+                        "closed-loop release must retain valid encoder samples and active current tracking");
+                    worst_excursion = fmaxf(worst_excursion, fabsf(actual_velocity - initial));
+                }
+                const float error = fabsf(actual_velocity - initial);
+                worst_final_error = fmaxf(worst_final_error, error);
+                if (error > 0.15f) {
+                    failf(name, "20-second release must return to the captured speed (rad/s)",
+                          actual_velocity, initial);
+                }
+            }
+        }
+    }
+    require_true(name, worst_excursion < 2.5f,
+        "the initial friction mismatch must settle without a large speed excursion");
+    printf("hold plant: worst final error %.4f rad/s, peak excursion %.4f rad/s\n",
+           (double)worst_final_error, (double)worst_excursion);
+}
+
+static void test_frictionless_hold_does_not_follow_slow_drift(void)
+{
+    const char *name = "frictionless_hold_does_not_follow_slow_drift";
+    for (unsigned direction = 0U; direction < 2U; ++direction) {
+        const float sign = direction == 0U ? 1.0f : -1.0f;
+        reset_hold_fixture();
+        observe_for(sign * 6.0f, 300U);
+        move_for(sign * 6.0f, 500U);
+        SmartKnobFrictionlessDebug held;
+        smart_knob_get_frictionless_debug(&held);
+        const float original_reference = held.reference_rad_s;
+        float velocity = sign * 6.0f, measured_velocity = velocity;
+        /* Temperature gradually changes bearing loss. Unlike imposing an
+           external speed trajectory, this plant allows PI to reject drift.
+           A small periodic torque also exercises the clutch's noise margin. */
+        for (unsigned sample = 0U; sample < 25000U; ++sample) {
+            const float temperature_change_ma = 2.0f * fminf((float)sample / 20000.0f, 1.0f);
+            const float friction_ma = 22.0f + (direction == 0U ? -1.0f : 1.0f) * temperature_change_ma;
+            const float speed = fabsf(velocity);
+            const float load = copysignf(friction_ma * (1.0f + 0.30f * expf(-speed * speed / 9.0f)) +
+                0.304f * speed, velocity);
+            const float residual_ma = 1.5f * sinf(2.0f * PI * 13.0f * (float)sample * 0.001f);
+            velocity += (commanded_current_ma - load + residual_ma) * 0.001f / 0.135f;
+            measured_velocity += (velocity - measured_velocity) / 9.0f;
+            advance_and_handle(mechanical_rad + velocity * 0.001f, measured_velocity, 1000U);
+            smart_knob_get_frictionless_debug(&held);
+            require_true(name, held.reference_rad_s == original_reference,
+                "temperature drift and residual ripple must not repeatedly rebase the release reference");
+        }
+        require_true(name, fabsf(velocity - original_reference) < 0.25f,
+            "the speed must stay close to release despite changing bearing loss and residual ripple");
+    }
+}
+
+static void hold_launch_plant_step(float *velocity, float *measured_velocity, float hand_current_ma)
+{
+    const float speed = fabsf(*velocity);
+    const float loss = 22.0f * (1.0f + 0.30f * expf(-speed * speed / 9.0f)) + 0.304f * speed;
+    const float applied = commanded_current_ma + hand_current_ma;
+    if (speed < 0.0001f && fabsf(applied) <= loss) {
+        *velocity = 0.0f;
+    } else {
+        const float direction_source = speed < 0.0001f ? applied : *velocity;
+        const float previous = *velocity;
+        *velocity += (applied - copysignf(loss, direction_source)) * 0.001f / 0.135f;
+        if (previous * *velocity < 0.0f && fabsf(applied) <= loss) *velocity = 0.0f;
+    }
+    *measured_velocity += (*velocity - *measured_velocity) / 9.0f;
+    advance_and_handle(mechanical_rad + *velocity * 0.001f, *measured_velocity, 1000U);
+}
+
+static void test_frictionless_hold_real_launch_from_rest(void)
+{
+    const char *name = "frictionless_hold_real_launch_from_rest";
+    const unsigned durations_ms[] = {80U, 120U, 160U};
+    float worst_release_error = 0.0f;
+    for (unsigned direction = 0U; direction < 2U; ++direction) {
+        for (unsigned duration = 0U; duration < 3U; ++duration) {
+            reset_hold_fixture();
+            float velocity = 0.0f, measured_velocity = 0.0f;
+            const float hand_current_ma = direction == 0U ? 40.0f : -40.0f;
+            for (unsigned sample = 0U; sample < durations_ms[duration]; ++sample) {
+                hold_launch_plant_step(&velocity, &measured_velocity, hand_current_ma);
+            }
+            const float released_velocity = velocity;
+            require_true(name, fabsf(released_velocity) > 6.0f && fabsf(released_velocity) < 45.0f,
+                "the hand launch must establish meaningful motion in the intended test range");
+            for (unsigned sample = 0U; sample < 5000U; ++sample) {
+                hold_launch_plant_step(&velocity, &measured_velocity, 0.0f);
+            }
+            const float error = fabsf(velocity - released_velocity);
+            worst_release_error = fmaxf(worst_release_error, error);
+            if (error > 1.5f) {
+                failf(name, "launch must retain release speed, not the initial arming-threshold speed (rad/s)",
+                      velocity, released_velocity);
+            }
+        }
+    }
+    printf("hold launch: worst release-speed error %.4f rad/s\n", (double)worst_release_error);
+}
+
+static void test_frictionless_hold_stop_reversal_and_resets(void)
+{
+    const char *name = "frictionless_hold_stop_reversal_and_resets";
+    reset_hold_fixture();
+    observe_for(10.0f, 300U);
+    move_for(10.0f, 500U);
+    move_for(0.0f, 1U);
+    require_true(name, commanded_current_ma == 0.0f && zero_current_tracking,
+        "hand stopping must remove the old speed request immediately");
+    for (unsigned sample = 0U; sample < 3000U; ++sample) {
+        move_for((sample & 1U) != 0U ? 0.08f : -0.08f, 1U);
+        require_true(name, commanded_current_ma == 0.0f && zero_current_tracking,
+            "stopped encoder noise must never restart an old held speed");
+    }
+    move_for(4.0f, 600U);
+    require_true(name, fabsf(commanded_current_ma - nominal_loss_ma(4.0f)) < 0.1f,
+        "a new flick after stopping must capture its own speed");
+    move_for(-6.0f, 1U);
+    require_true(name, commanded_current_ma == 0.0f,
+        "reversal must immediately erase the forward hold request");
+    move_for(-6.0f, 600U);
+    require_true(name, fabsf(commanded_current_ma - nominal_loss_ma(-6.0f)) < 0.1f,
+        "reverse release must not restore the old positive speed reference");
+
+    for (unsigned reset = 0U; reset < 6U; ++reset) {
+        reset_hold_fixture();
+        observe_for(10.0f, 300U);
+        move_for(10.0f, 500U);
+        move_for(10.3f, 5000U);
+        require_true(name, commanded_current_ma < 5.0f,
+            "reset precondition must contain a nonzero correction and stored old target");
+        if (reset == 0U) error_code = 1U;
+        if (reset == 1U) output_enabled = 0U;
+        if (reset == 2U) over_vol_flag = 1U;
+        if (reset == 3U) advance_and_handle(mechanical_rad, 12.0f, 50000U);
+        else if (reset == 4U) advance_and_handle(mechanical_rad + 2.0f, 12.0f, 1000U);
+        else if (reset == 5U) {
+            (void)smart_knob_select_mode(SMART_KNOB_MODE_CUSTOM);
+            move_for(12.0f, 1U);
+        } else move_for(12.0f, 1U);
+        require_true(name, commanded_current_ma == 0.0f && !zero_current_tracking,
+            "fault, disabled, overvoltage, stale, invalid and other-mode paths must discard active hold");
+        error_code = 0U;
+        output_enabled = 1U;
+        over_vol_flag = 0U;
+        if (reset == 5U) (void)smart_knob_select_mode(SMART_KNOB_MODE_FRICTIONLESS);
+        move_for(4.0f, 600U);
+        require_true(name, fabsf(commanded_current_ma - nominal_loss_ma(4.0f)) < 0.1f &&
+            zero_current_tracking,
+            "recovery must capture present speed with no stale reference or integral torque");
+    }
+}
+
+static void test_frictionless_hold_yields_to_gestures(void)
+{
+    const char *name = "frictionless_hold_yields_to_gestures";
+    for (unsigned direction = 0U; direction < 2U; ++direction) {
+        const float sign = direction == 0U ? 1.0f : -1.0f;
+        reset_hold_fixture();
+        observe_for(sign * 12.0f, 300U);
+        move_for(sign * 12.0f, 500U);
+        /* A deliberate fast slowing action must let go of the original
+           target, then accept a second acceleration in the same direction. */
+        for (unsigned sample = 1U; sample <= 45U; ++sample) {
+            move_for(sign * (12.0f - 0.20f * (float)sample), 1U);
+            require_true(name, commanded_current_ma * sign <=
+                fabsf(nominal_loss_ma(motor_rps_fast)) + 24.1f,
+                "the controller must not fight a hand with more than its small correction budget");
+        }
+        float velocity = sign * 3.0f, measured_velocity = velocity;
+        for (unsigned sample = 0U; sample < 1500U; ++sample) {
+            hold_launch_plant_step(&velocity, &measured_velocity, 0.0f);
+        }
+        SmartKnobFrictionlessDebug held;
+        smart_knob_get_frictionless_debug(&held);
+        require_true(name, fabsf(held.reference_rad_s - sign * 3.0f) < 0.5f &&
+            fabsf(velocity - held.reference_rad_s) < 0.15f,
+            "a slowing gesture must replace the old speed and the released plant must follow its averaged target");
+        for (unsigned sample = 1U; sample <= 60U; ++sample) {
+            move_for(sign * (3.0f + 0.20f * (float)sample), 1U);
+        }
+        velocity = sign * 15.0f;
+        measured_velocity = velocity;
+        for (unsigned sample = 0U; sample < 1500U; ++sample) {
+            hold_launch_plant_step(&velocity, &measured_velocity, 0.0f);
+        }
+        smart_knob_get_frictionless_debug(&held);
+        /* Capture averages a finite release window. Permit 5% (or 0.5 rad/s
+           at low speed) for that estimate, but verify actual motion converges
+           much more closely to the frozen target instead of drifting. */
+        const float release_tolerance = fmaxf(0.5f, 0.05f * 15.0f);
+        require_true(name, fabsf(held.reference_rad_s - sign * 15.0f) < release_tolerance &&
+            fabsf(velocity - held.reference_rad_s) < 0.15f,
+            "a subsequent acceleration gesture must capture and physically retain the faster release speed");
+    }
+}
+
+static void test_frictionless_hold_observer_handover(void)
+{
+    const char *name = "frictionless_hold_observer_handover";
+    reset_hold_fixture();
+    observe_for(6.0f, 300U);
+    move_for(6.0f, 500U);
+    move_for(6.3f, 5000U);
+    require_true(name, commanded_current_ma < 0.0f,
+        "handover precondition must contain a previous hold correction");
+    MotorDriverSetCurrentRealContinuous(61.0f);
+    const uint32_t writes_before = actuator_write_count;
+    observe_for(14.0f, 500U);
+    require_true(name, actuator_write_count == writes_before &&
+        commanded_current_ma == 61.0f && !zero_current_tracking,
+        "observing while the diagnostic controls speed must never write the actuator");
+    move_for(14.0f, 1U);
+    SmartKnobFrictionlessDebug held;
+    smart_knob_get_frictionless_debug(&held);
+    require_true(name, fabsf(held.reference_rad_s - 14.0f) < 0.05f &&
+        fabsf(commanded_current_ma - nominal_loss_ma(14.0f)) < 1.0f &&
+        zero_current_tracking && actuator_write_count == writes_before + 1U,
+        "the first normal-control sample must use current release speed without an old integral kick");
+    move_for(14.0f, 500U);
+    require_true(name, fabsf(commanded_current_ma - nominal_loss_ma(14.0f)) < 1.0f,
+        "a diagnostic observer must not retain its previous held speed across handover");
+}
+
+static void test_frictionless_hold_gentle_start_and_slow_gestures(void)
+{
+    const char *name = "frictionless_hold_gentle_start_and_slow_gestures";
+    const unsigned launch_duration_ms[] = {300U, 1000U};
+    const float launch_speed[] = {3.0f, 6.0f};
+    for (unsigned direction = 0U; direction < 2U; ++direction) {
+        const float sign = direction == 0U ? 1.0f : -1.0f;
+        for (unsigned launch = 0U; launch < 2U; ++launch) {
+            reset_hold_fixture();
+            for (unsigned sample = 1U; sample <= launch_duration_ms[launch]; ++sample) {
+                move_for(sign * launch_speed[launch] * (float)sample /
+                    (float)launch_duration_ms[launch], 1U);
+            }
+            move_for(sign * launch_speed[launch], 1500U);
+            SmartKnobFrictionlessDebug held;
+            smart_knob_get_frictionless_debug(&held);
+            require_true(name, fabsf(held.reference_rad_s - sign * launch_speed[launch]) < 0.2f,
+                "gentle launches must capture release speed instead of locking to the start threshold");
+        }
+
+        reset_hold_fixture();
+        observe_for(sign * 10.0f, 300U);
+        move_for(sign * 10.0f, 500U);
+        /* Slow hand-controlled deceleration is well below the fast-gesture
+           threshold. The clutch must still stop trying to restore 10 rad/s. */
+        for (unsigned sample = 1U; sample <= 600U; ++sample) {
+            move_for(sign * (10.0f - 0.010f * (float)sample), 1U);
+        }
+        move_for(sign * 4.0f, 800U);
+        SmartKnobFrictionlessDebug held;
+        smart_knob_get_frictionless_debug(&held);
+        require_true(name, fabsf(held.reference_rad_s - sign * 4.0f) < 0.3f,
+            "a sustained slow hand action must release the previous speed target");
+
+        reset_hold_fixture();
+        observe_for(sign * 20.0f, 300U);
+        move_for(sign * 20.0f, 500U);
+        float velocity = sign * 20.0f, measured_velocity = velocity;
+        for (unsigned sample = 0U; sample < 2500U; ++sample) {
+            hold_launch_plant_step(&velocity, &measured_velocity, 0.0f);
+        }
+        for (unsigned sample = 0U; sample < 150U; ++sample) {
+            hold_launch_plant_step(&velocity, &measured_velocity, -sign * 18.0f);
+        }
+        const float released_velocity = velocity;
+        if (fabsf(released_velocity) >= 18.8f || fabsf(released_velocity) <= 5.0f) {
+            failf(name, "the slow braking plant must establish a lower nonzero release speed",
+                  released_velocity, sign * 15.0f);
+        }
+        for (unsigned sample = 0U; sample < 3000U; ++sample) {
+            hold_launch_plant_step(&velocity, &measured_velocity, 0.0f);
+        }
+        require_true(name, fabsf(velocity) < 19.0f,
+            "the braking gesture must actually establish a lower target instead of returning to the old speed");
+        if (fabsf(velocity - released_velocity) > 1.0f) {
+            failf(name, "after a gentle physical brake the plant must retain its new release speed",
+                  velocity, released_velocity);
+        }
+    }
+}
+
+static void test_frictionless_hold_extreme_tuning_and_current_budget(void)
+{
+    const char *name = "frictionless_hold_extreme_tuning_and_current_budget";
+    const uint32_t sample_period_us[] = {500U, 1000U, 5000U, 20000U};
+    for (unsigned direction = 0U; direction < 2U; ++direction) {
+        const float sign = direction == 0U ? 1.0f : -1.0f;
+        for (unsigned period = 0U; period < 4U; ++period) {
+            SmartKnobModeConfig *mode = reset_hold_fixture();
+            mode->tuning.current_scale_a = 1000.0f;
+            mode->tuning.p_gain = 8.0f; /* A previously saved maximum inertia. */
+            smart_knob_set_test_cogging_scale(1.0f);
+            const uint32_t dt_us = sample_period_us[period];
+            float maximum_current_ma = 0.0f;
+            for (unsigned sample = 0U; sample < 3000000U / dt_us; ++sample) {
+                const float velocity = sign * ((sample * dt_us / 200000U) % 2U != 0U ? 25.0f : 10.0f);
+                advance_and_handle(mechanical_rad + velocity * (float)dt_us * 1e-6f, velocity, dt_us);
+                maximum_current_ma = fmaxf(maximum_current_ma, fabsf(commanded_current_ma));
+                SmartKnobFrictionlessDebug held;
+                smart_knob_get_frictionless_debug(&held);
+                require_true(name, isfinite(commanded_current_ma) && fabsf(commanded_current_ma) <= 164.01f,
+                    "huge saved FORCE must remain within mean, gentle correction, angle and inertia budgets");
+                require_true(name, fabsf(held.feedforward_a) <= 0.06001f,
+                    "the production mean feedforward must stay below 60 mA before speed feedback can react");
+                require_true(name, (runtime_state(name).flags & (1U << 3)) != 0U,
+                    "current-budget checks must exercise valid control steps across supported sample periods");
+            }
+            require_true(name, maximum_current_ma > 40.0f,
+                "extreme-tuning test must reach real compensation rather than only inhibited samples");
+
+            mode->tuning.current_limit_a = 0.005f;
+            for (unsigned sample = 0U; sample < 1000000U / dt_us; ++sample) {
+                const float velocity = sign * (10.0f + 0.002f * (float)(sample % 100U));
+                advance_and_handle(mechanical_rad + velocity * (float)dt_us * 1e-6f, velocity, dt_us);
+                require_true(name, fabsf(commanded_current_ma) <= 5.01f,
+                    "the configured 5 mA limit must cap all components even with old extreme FORCE and inertia");
+            }
+            mode->tuning.p_gain = 0.0f;
+            smart_knob_set_test_cogging_scale(0.0f);
+            move_for(sign * 10.0f, 500U);
+            /* Force demand into saturation, then restore the captured speed.
+               Feedback must not hide an accumulated integral behind clipping. */
+            move_for(sign * 9.7f, 3000U);
+            SmartKnobFrictionlessDebug held;
+            smart_knob_get_frictionless_debug(&held);
+            require_true(name, fabsf(held.integral_a) < 0.00001f &&
+                fabsf(commanded_current_ma) <= 5.01f,
+                "the hold integrator must know the effective small current budget and avoid windup");
+            mode->tuning.current_limit_a = 0.0f;
+            move_for(sign * 9.7f, 1U);
+            smart_knob_get_frictionless_debug(&held);
+            require_true(name, commanded_current_ma == 0.0f && held.integral_a == 0.0f &&
+                held.reference_rad_s == 0.0f,
+                "a zero current budget must clear both output and the old speed hold state");
+        }
+        const float high_speeds[] = {80.0f, 120.0f};
+        for (unsigned speed = 0U; speed < 2U; ++speed) {
+            reset_hold_fixture();
+            const float released = sign * high_speeds[speed];
+            observe_for(released, 600U);
+            move_for(released, 1U);
+            SmartKnobFrictionlessDebug held;
+            smart_knob_get_frictionless_debug(&held);
+            require_true(name, fabsf(held.reference_rad_s - released) < 0.01f &&
+                commanded_current_ma * sign > 40.0f,
+                "high-speed release must capture actual speed and retain accelerating assistance above 60 rad/s");
+            float velocity = released, measured_velocity = velocity;
+            for (unsigned sample = 0U; sample < 20000U; ++sample) {
+                hold_launch_plant_step(&velocity, &measured_velocity, 0.0f);
+                smart_knob_get_frictionless_debug(&held);
+                require_true(name, held.reference_rad_s == released &&
+                    fabsf(commanded_current_ma) <= 84.01f,
+                    "high-speed holding must preserve its frozen target and the normal mean-current budget");
+            }
+            require_true(name, fabsf(velocity - released) < 0.15f,
+                "both directions must retain 80 and 120 rad/s release speeds for 20 seconds");
+        }
+    }
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) {
@@ -1315,7 +1751,7 @@ int main(int argc, char **argv)
         test_frictionless_low_speed_loss_properties();
     } else if (strcmp(argv[1], "frictionless-limits") == 0) {
         test_frictionless_limits_and_recovery();
-    } else if (strcmp(argv[1], "frictionless-unlimited") == 0) {
+    } else if (strcmp(argv[1], "frictionless-unlimited-speed") == 0) {
         test_frictionless_unlimited_speed();
     } else if (strcmp(argv[1], "frictionless-observer") == 0) {
         test_frictionless_observer_does_not_write_actuator();
@@ -1333,6 +1769,22 @@ int main(int argc, char **argv)
         test_frictionless_inertia_parameter_and_current_limits();
     } else if (strcmp(argv[1], "frictionless-inertia-observer") == 0) {
         test_frictionless_inertia_observer_continuity();
+    } else if (strcmp(argv[1], "frictionless-hold-plant") == 0) {
+        test_frictionless_hold_rejects_model_error();
+    } else if (strcmp(argv[1], "frictionless-hold-launch") == 0) {
+        test_frictionless_hold_real_launch_from_rest();
+    } else if (strcmp(argv[1], "frictionless-hold-drift") == 0) {
+        test_frictionless_hold_does_not_follow_slow_drift();
+    } else if (strcmp(argv[1], "frictionless-hold-reset") == 0) {
+        test_frictionless_hold_stop_reversal_and_resets();
+    } else if (strcmp(argv[1], "frictionless-hold-gesture") == 0) {
+        test_frictionless_hold_yields_to_gestures();
+    } else if (strcmp(argv[1], "frictionless-hold-handover") == 0) {
+        test_frictionless_hold_observer_handover();
+    } else if (strcmp(argv[1], "frictionless-hold-slow-gesture") == 0) {
+        test_frictionless_hold_gentle_start_and_slow_gestures();
+    } else if (strcmp(argv[1], "frictionless-hold-current-budget") == 0) {
+        test_frictionless_hold_extreme_tuning_and_current_budget();
     } else {
         fprintf(stderr, "unknown test case: %s\n", argv[1]);
         return EXIT_FAILURE;

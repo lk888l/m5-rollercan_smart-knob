@@ -121,8 +121,18 @@ enum {
 void init_smart_knob(void);
 void handle_smart_knob(void);
 #ifdef ROLLERCAN_MOTOR_DIAGNOSTICS
+typedef struct {
+    float reference_rad_s;
+    float correction_a;
+    float integral_a;
+    float feedforward_a;
+    float acceleration_rad_s2;
+    uint32_t state;
+} SmartKnobFrictionlessDebug;
 void smart_knob_observe_motion(void);
 void smart_knob_set_test_cogging_scale(float scale);
+void smart_knob_set_test_hold_enabled(bool enabled);
+void smart_knob_get_frictionless_debug(SmartKnobFrictionlessDebug *state);
 #endif
 void smart_knob_set_update_rate(float update_rate_hz);
 
